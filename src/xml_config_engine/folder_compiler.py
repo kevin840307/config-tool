@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
+import base64
 from typing import Any
 
 from yaml_config_engine.yamlio import dump_one, load_one
@@ -36,7 +37,9 @@ class XmlFolderCompiler:
             if action == 'delete':
                 files[rel] = {'delete': True}
             elif action == 'create':
-                files[rel] = {'create_text': (out / entry['payload']).read_text(encoding='utf-8-sig')}
+                files[rel] = {
+                    'create_bytes_base64': base64.b64encode((out / entry['payload']).read_bytes()).decode('ascii')
+                }
             elif action == 'patch':
                 cfg = load_one(out / entry['config'])
                 files[rel] = {
@@ -113,7 +116,13 @@ class XmlFolderCompiler:
             if spec.get('delete') is True:
                 if target.exists(): target.unlink()
                 action = 'delete'
+            elif 'create_bytes_base64' in spec:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(base64.b64decode(spec['create_bytes_base64']))
+                action = 'create'
             elif 'create_text' in spec:
+                # Backward compatibility with compact patches generated before
+                # exact-byte payloads were introduced.
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(str(spec['create_text']), encoding='utf-8')
                 action = 'create'

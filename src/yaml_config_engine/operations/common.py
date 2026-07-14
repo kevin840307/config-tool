@@ -7,6 +7,7 @@ from .base import registry, OperationContext
 from ..pathing import get_node, set_node, remove_node, get_parent
 from ..matcher import find_indices
 from ..errors import MatchError, OperationError
+from ..comparison import strict_equal
 
 
 
@@ -135,7 +136,13 @@ def op_set(ctx: OperationContext, spec: dict[str, Any]) -> Any:
         if not keys:
             if policy == "skip": return ctx.document
             if policy == "create" and exact is not None:
-                parent[exact] = deepcopy(spec["value"]); return ctx.document
+                _mapping_insert(
+                    parent,
+                    exact,
+                    deepcopy(spec["value"]),
+                    spec.get("position") or {"last": True},
+                )
+                return ctx.document
             raise OperationError(f"No mapping key matched selector at {path}")
         if len(keys) > 1 and spec.get("on_multiple_matches", "all") == "error":
             raise MatchError(f"key selector matched multiple keys ({len(keys)})")
@@ -149,6 +156,25 @@ def op_set(ctx: OperationContext, spec: dict[str, Any]) -> Any:
         exists = False
     if not exists and policy == "skip": return ctx.document
     if not exists and policy == "error": raise OperationError(f"Path not found: {path!r}")
+    if not exists and policy == "create":
+        # When only the final mapping key is missing, insert it through the
+        # comment-aware mapping helper. This keeps comments that visually sit
+        # between the previous section and the newly-created section attached
+        # to the correct boundary instead of duplicating or stranding them.
+        try:
+            parent, key = get_parent(ctx.document, path)
+            if isinstance(parent, dict) and isinstance(key, str):
+                _mapping_insert(
+                    parent,
+                    key,
+                    deepcopy(spec["value"]),
+                    spec.get("position") or {"last": True},
+                )
+                return ctx.document
+        except Exception:
+            # A deeper parent is missing; retain the existing recursive-create
+            # behavior for that case.
+            pass
     ctx.document = set_node(ctx.document, path, deepcopy(spec["value"]), policy == "create")
     return ctx.document
 
@@ -202,7 +228,13 @@ def op_rename_key(ctx: OperationContext, spec: dict[str, Any]) -> Any:
     parent = get_node(ctx.document, spec.get("path", "$"))
     old, new = spec["old_key"], spec["new_key"]
     keys = list(parent.keys())
-    if old not in parent: raise OperationError(f"Missing key: {old}")
+    if old not in parent:
+        policy = _missing_policy(spec, allow_create=False)
+        if policy == "skip" and new in parent:
+            return ctx.document
+        if policy == "skip":
+            return ctx.document
+        raise OperationError(f"Missing key: {old}")
     idx = keys.index(old)
     value = parent.pop(old)
     if hasattr(parent, "insert"):
@@ -296,6 +328,10 @@ def op_insert(ctx: OperationContext, spec: dict[str, Any]) -> Any:
             duplicate = next((x for x in seq if isinstance(x, dict) and all(x.get(k) == value.get(k) for k in unique_by)), None)
             if duplicate is not None:
                 if policy == "skip": continue
+                if policy == "skip_if_equal":
+                    if strict_equal(duplicate, value):
+                        continue
+                    raise OperationError(f"Duplicate item differs by {unique_by}")
                 if policy == "update": duplicate.update(value); continue
                 if policy == "error": raise OperationError(f"Duplicate item by {unique_by}")
         seq.insert(idx, value); idx += 1
@@ -320,12 +356,20 @@ def op_update_item(ctx: OperationContext, spec: dict[str, Any]) -> Any:
     for idx in indices:
         item = seq[idx]
         for path, value in spec.get("set", {}).items():
-            if "." in path or "[" in path:
-                set_node(item, path, deepcopy(value), True)
-            else:
-                item[path] = deepcopy(value)
+            target_path = path if ("." in path or "[" in path or str(path).startswith(("$", "/"))) else "$/{0}".format(str(path).replace("~", "~0").replace("/", "~1"))
+            set_node(item, target_path, deepcopy(value), True)
         for path in spec.get("remove", []):
             remove_node(item, path)
+        # Run nested operations against the matched item itself. This lets the
+        # compiler update deep mappings/lists without replacing the whole
+        # subtree, preserving comments, anchors, quoting, and unaffected style.
+        if spec.get("item_operations"):
+            nested = OperationContext(document=item, original=deepcopy(item), variables=ctx.variables, captures=ctx.captures)
+            for nested_spec in spec["item_operations"]:
+                if not isinstance(nested_spec, dict) or "op" not in nested_spec:
+                    raise OperationError("update_item.item_operations entries require op")
+                registry.execute(nested_spec["op"], nested, nested_spec)
+            seq[idx] = nested.document
     return ctx.document
 
 def _preserve_removed_item_trailing_comments(seq: Any, indices: list[int]) -> None:
@@ -420,8 +464,8 @@ def op_copy_item(ctx: OperationContext, spec: dict[str, Any]) -> Any:
         if ca is not None:
             ca.comment = None
     for path, value in spec.get("set", spec.get("overrides", {})).items():
-        if "." in path or "[" in path: set_node(item, path, deepcopy(value), True)
-        else: item[path] = deepcopy(value)
+        target_path = path if ("." in path or "[" in path or str(path).startswith(("$", "/"))) else "$/{0}".format(str(path).replace("~", "~0").replace("/", "~1"))
+        set_node(item, target_path, deepcopy(value), True)
     for path in spec.get("remove", []): remove_node(item, path)
     # Apply operations to the copied item before insertion. This supports
     # dynamic-key rename/copy/move without repeating the full source item.
@@ -438,6 +482,11 @@ def op_copy_item(ctx: OperationContext, spec: dict[str, Any]) -> Any:
         if dup:
             policy = spec.get("duplicate", {}).get("policy", "error")
             if policy == "skip": return ctx.document
+            if policy == "skip_if_equal":
+                duplicate_item = next(x for x in seq if isinstance(x, dict) and all(x.get(k) == item.get(k) for k in unique_by))
+                if strict_equal(duplicate_item, item):
+                    return ctx.document
+                raise OperationError(f"Duplicate copied item differs by {unique_by}")
             if policy == "error": raise OperationError(f"Duplicate copied item by {unique_by}")
     seq.insert(_resolve_position(seq, spec.get("position"), src_idx + 1), item)
     return ctx.document
@@ -455,10 +504,88 @@ def op_capture(ctx: OperationContext, spec: dict[str, Any]) -> Any:
     return ctx.document
 
 
+def _standalone_comment_tokens_on_last_chain(node: Any) -> list[tuple[list[Any], int, Any]]:
+    """Locate newline-prefixed comments visually following a subtree.
+
+    ruamel commonly stores a comment that appears *between* siblings on the
+    deepest final key/item of the previous sibling. When a new mapping key is
+    inserted between those siblings, that boundary comment must move with the
+    boundary or it appears inside the newly extended previous subtree.
+    """
+    found: list[tuple[list[Any], int, Any]] = []
+    if isinstance(node, dict) and node:
+        last_key = next(reversed(node))
+        found.extend(_standalone_comment_tokens_on_last_chain(node[last_key]))
+        ca = getattr(node, 'ca', None)
+        slots = getattr(ca, 'items', {}).get(last_key) if ca is not None else None
+        if slots:
+            for index, token in enumerate(slots):
+                text = getattr(token, 'value', '') if token is not None else ''
+                if text.startswith(('\n', '\r')) and text.strip():
+                    found.append((slots, index, token))
+    elif isinstance(node, list) and node:
+        last_index = len(node) - 1
+        found.extend(_standalone_comment_tokens_on_last_chain(node[last_index]))
+        ca = getattr(node, 'ca', None)
+        slots = getattr(ca, 'items', {}).get(last_index) if ca is not None else None
+        if slots:
+            for index, token in enumerate(slots):
+                text = getattr(token, 'value', '') if token is not None else ''
+                if text.startswith(('\n', '\r')) and text.strip():
+                    found.append((slots, index, token))
+    return found
+
+
+def _attach_trailing_comment_token(node: Any, token: Any) -> bool:
+    """Attach a boundary comment to the deepest final child of a subtree."""
+    if isinstance(node, dict) and node:
+        last_key = next(reversed(node))
+        if _attach_trailing_comment_token(node[last_key], token):
+            return True
+        ca = getattr(node, 'ca', None)
+        if ca is not None:
+            slots = ca.items.setdefault(last_key, [None, None, None, None])
+            for index in (2, 3, 0, 1):
+                if slots[index] is None:
+                    slots[index] = deepcopy(token)
+                    return True
+    elif isinstance(node, list) and node:
+        last_index = len(node) - 1
+        if _attach_trailing_comment_token(node[last_index], token):
+            return True
+        ca = getattr(node, 'ca', None)
+        if ca is not None:
+            slots = ca.items.setdefault(last_index, [None, None, None, None])
+            for index in (0, 1, 2, 3):
+                if slots[index] is None:
+                    slots[index] = deepcopy(token)
+                    return True
+    return False
+
+
+def _relocate_boundary_comments(previous_value: Any, inserted_value: Any) -> None:
+    previous = _standalone_comment_tokens_on_last_chain(previous_value)
+    if not previous:
+        return
+    inserted_texts = {
+        getattr(token, 'value', '')
+        for _, _, token in _standalone_comment_tokens_on_last_chain(inserted_value)
+    }
+    for slots, index, token in previous:
+        text = getattr(token, 'value', '')
+        if text in inserted_texts:
+            slots[index] = None
+            continue
+        if _attach_trailing_comment_token(inserted_value, token):
+            slots[index] = None
+            inserted_texts.add(text)
+
+
 def _mapping_insert(parent: Any, key: str, value: Any, position: dict[str, Any] | None) -> None:
     """Insert a mapping key at an arbitrary readable position."""
     position = position or {}
     keys = list(parent.keys())
+    key_existed = key in parent
     if position.get('first') is True:
         idx = 0
     elif position.get('last') is True:
@@ -480,14 +607,26 @@ def _mapping_insert(parent: Any, key: str, value: Any, position: dict[str, Any] 
         idx = min(idx, len(keys))
     else:
         idx = len(keys)
+    previous_value = parent[keys[idx - 1]] if (not key_existed and idx > 0 and idx <= len(keys)) else None
     if key in parent:
         del parent[key]
         keys = list(parent.keys())
         idx = min(idx, len(keys))
+    if previous_value is not None:
+        _relocate_boundary_comments(previous_value, value)
     if hasattr(parent, 'insert'):
         parent.insert(idx, key, value)
     else:
         items = list(parent.items()); items.insert(idx, (key, value)); parent.clear(); parent.update(items)
+
+
+def _direct_root_mapping_key(path: str) -> str | None:
+    """Return a direct root key for dot or JSON-Pointer generated paths."""
+    if path.startswith('$.') and '.' not in path[2:] and '[' not in path:
+        return path[2:]
+    if path.startswith('$/') and '/' not in path[2:]:
+        return path[2:].replace('~1', '/').replace('~0', '~')
+    return None
 
 
 @registry.register('copy_item_to_node')
@@ -512,18 +651,18 @@ def op_copy_item_to_node(ctx: OperationContext, spec: dict[str, Any]) -> Any:
         if ca is not None:
             ca.comment = None
     for path, item_value in spec.get('set', {}).items():
-        if '.' in path or '[' in path: set_node(value, path, deepcopy(item_value), True)
-        else: value[path] = deepcopy(item_value)
+        item_target_path = path if ('.' in path or '[' in path or str(path).startswith(('$', '/'))) else '$/{0}'.format(str(path).replace('~', '~0').replace('/', '~1'))
+        set_node(value, item_target_path, deepcopy(item_value), True)
     for path in spec.get('remove', []): remove_node(value, path)
     if spec.get('item_operations'):
         nested = OperationContext(document=value, original=deepcopy(value), variables=ctx.variables, captures=ctx.captures)
         for nested_spec in spec['item_operations']:
             registry.execute(nested_spec['op'], nested, nested_spec)
         value = nested.document
-    # For a root mapping child, preserve requested mapping order.
-    if target_path.startswith('$.') and '.' not in target_path[2:] and '[' not in target_path:
-        key = target_path[2:]
-        _mapping_insert(ctx.document, key, value, spec.get('position'))
+    # For a direct root mapping child, preserve requested mapping order.
+    root_key = _direct_root_mapping_key(target_path)
+    if root_key is not None:
+        _mapping_insert(ctx.document, root_key, value, spec.get('position'))
     else:
         ctx.document = set_node(ctx.document, target_path, value, spec.get('create_missing', True))
     return ctx.document
@@ -554,8 +693,9 @@ def op_copy_move_node_v2(ctx: OperationContext, spec: dict[str, Any]) -> Any:
     if not isinstance(source_path, str) or not isinstance(target_path, str):
         raise OperationError('copy_node/move_node require from_path and to_path')
     value = deepcopy(get_node(ctx.document, source_path))
-    if target_path.startswith('$.') and '.' not in target_path[2:] and '[' not in target_path:
-        _mapping_insert(ctx.document, target_path[2:], value, spec.get('position'))
+    root_key = _direct_root_mapping_key(target_path)
+    if root_key is not None:
+        _mapping_insert(ctx.document, root_key, value, spec.get('position'))
     else:
         ctx.document = set_node(ctx.document, target_path, value, spec.get('create_missing', True))
     if spec['op'] == 'move_node': ctx.document = remove_node(ctx.document, source_path)

@@ -37,8 +37,16 @@ def _mixed(e: ET.Element) -> bool:
 
 class XmlDiffCompiler:
     def compile_files(self, before: str|Path, after: str|Path) -> XmlCompileResult:
-        btxt=Path(before).read_text(encoding='utf-8-sig'); atxt=Path(after).read_text(encoding='utf-8-sig')
-        return self.compile_text(btxt,atxt)
+        before_bytes = Path(before).read_bytes()
+        after_bytes = Path(after).read_bytes()
+        # Decode bytes directly rather than Path.read_text so CRLF is not
+        # normalized by universal-newline handling.
+        btxt = before_bytes.decode('utf-8-sig')
+        atxt = after_bytes.decode('utf-8-sig')
+        result = self.compile_text(btxt, atxt)
+        if result.config.get('xml_action') == 'replace_entire_file':
+            result.config['xml_utf8_bom'] = after_bytes.startswith(b'\xef\xbb\xbf')
+        return result
 
     def compile_text(self,btxt:str,atxt:str)->XmlCompileResult:
         warnings=[]

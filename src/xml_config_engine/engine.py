@@ -257,6 +257,29 @@ class XmlPatchEngine:
                         return apply_patches(text, [self._insert_child_patch(text, selector_parent_targets[0].node, exact_selector_name, spec.get('value'), spec.get('position'))])
                     if '/@' in path:
                         return self._create_missing_attribute(text, root, path, spec.get('value'))
+                    # Support the common enterprise case where a predicate or
+                    # wildcard uniquely selects an existing parent and only
+                    # the final child section is missing, for example:
+                    # /components/component[@id='c050']/runtime.
+                    parent_path, separator, child_name = path.rpartition('/')
+                    if (separator and parent_path and
+                            re.fullmatch(r'[A-Za-z_][\w:.-]*', child_name or '')):
+                        parents = select(text, root, parent_path)
+                        if parents:
+                            parent_expect = {
+                                'path': parent_path,
+                                'on_multiple_matches': spec.get('on_multiple_matches', 'error'),
+                                'on_zero_matches': 'error',
+                            }
+                            _expect(parents, parent_expect, op + '.create-parent')
+                            patches = [
+                                self._insert_child_patch(
+                                    text, parent.node, child_name, spec.get('value'),
+                                    spec.get('position') or {'last': True},
+                                )
+                                for parent in parents
+                            ]
+                            return apply_patches(text, patches)
                     return self._create_missing(text, root, path, spec.get('value'))
             _expect(targets, spec, op)
             value = spec.get('value')

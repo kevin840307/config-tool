@@ -63,13 +63,13 @@ class DiffCompiler:
         if renamed:
             a = deepcopy(a)
             for old_key, new_key in renamed:
-                ops.append({'op':'rename_key','path':path,'old_key':old_key,'new_key':new_key})
+                ops.append({'op':'rename_key','path':path,'old_key':old_key,'new_key':new_key,'missing':'skip'})
                 value = a.pop(old_key)
                 idx = bkeys.index(new_key)
                 if hasattr(a, 'insert'): a.insert(min(idx, len(a)), new_key, value)
                 else: a[new_key] = value
         for k in removed:
-            ops.append({'op':'remove','path':self._join(path,k)})
+            ops.append({'op':'remove','path':self._join(path,k),'missing':'skip'})
         for k in added:
             pos: dict[str,Any] = {}
             idx = bkeys.index(k)
@@ -90,10 +90,24 @@ class DiffCompiler:
                 ops.append({'op':'insert_key','path':path,'key':k,'value':deepcopy(b[k]),'position':pos})
         for k in [x for x in akeys if x in b]:
             self._diff(a[k], b[k], self._join(path,k), ops)
-        # Enforce exact mapping order after rename/add/remove. Generated configs use
-        # relative keys, never mapping indexes. Moving in target order is deterministic.
-        if akeys != bkeys or renamed or removed or added:
+        # Enforce mapping order only when rename/remove/insert operations do not
+        # already yield the requested order. Avoiding no-op key moves is critical
+        # for round-trip comments attached to mapping keys.
+        current_order = list(akeys)
+        for old_key, new_key in renamed:
+            if old_key in current_order:
+                current_order[current_order.index(old_key)] = new_key
+        current_order = [key for key in current_order if key not in removed]
+        for key in added:
+            target_index = bkeys.index(key)
+            current_order.insert(min(target_index, len(current_order)), key)
+        if current_order != bkeys:
             for idx, key in enumerate(bkeys):
+                if idx < len(current_order) and current_order[idx] == key:
+                    continue
+                if key in current_order:
+                    current_order.remove(key)
+                current_order.insert(idx, key)
                 if idx > 0:
                     position = {'after_key': bkeys[idx - 1]}
                 elif len(bkeys) > 1:
@@ -118,20 +132,31 @@ class DiffCompiler:
                 clone = self._find_clone(aid,item,keys)
                 if clone is not None:
                     clone_id, set_values, item_operations = clone
-                    copy_op={'op':'copy_item','path':path,'source':{'match':dict(zip(keys,clone_id)),'expect_matches':1},'set':set_values,'position':position,'duplicate':{'unique_by':keys,'policy':'error'}}
+                    copy_op={'op':'copy_item','path':path,'source':{'match':dict(zip(keys,clone_id)),'expect_matches':1},'set':set_values,'position':position,'duplicate':{'unique_by':keys,'policy':'skip_if_equal'}}
                     if item_operations:
                         copy_op['item_operations']=item_operations
                     ops.append(copy_op)
                 else:
-                    ops.append({'op':'insert','path':path,'position':position,'value':deepcopy(item)})
+                    ops.append({'op':'insert','path':path,'position':position,'value':deepcopy(item),
+                                'duplicate':{'unique_by':keys,'policy':'skip_if_equal'}})
         for ident in aid.keys()-bid.keys():
-            ops.append({'op':'remove_item','path':path,'match':dict(zip(keys,ident)),'expect_matches':1})
+            ops.append({'op':'remove_item','path':path,'match':dict(zip(keys,ident)),
+                        'missing':'skip','on_multiple_matches':'error'})
         for ident in aid.keys() & bid.keys():
             old,new=aid[ident],bid[ident]
-            changes={k:deepcopy(v) for k,v in new.items() if old.get(k)!=v}
-            removed=[k for k in old if k not in new]
-            if changes or removed:
-                ops.append({'op':'update_item','path':path,'match':dict(zip(keys,ident)),'set':changes,'remove':removed,'expect_matches':1})
+            # Diff inside the existing item instead of replacing changed
+            # top-level containers wholesale. Replacing a routes/config list
+            # would discard comments and formatting on every unchanged child.
+            item_operations: list[dict[str, Any]] = []
+            self._diff(old, new, '$', item_operations)
+            if item_operations:
+                ops.append({
+                    'op':'update_item',
+                    'path':path,
+                    'match':dict(zip(keys,ident)),
+                    'item_operations':item_operations,
+                    'expect_matches':1,
+                })
         # generate deterministic moves after add/remove/update
         current=[self._identity(x,keys) for x in a if self._identity(x,keys) in bid]
         for pos,item in enumerate(b):
@@ -199,38 +224,88 @@ class DiffCompiler:
         hash(values)
         return values
 
-    @staticmethod
-    def _find_clone(amap:dict[tuple[Any,...],dict[str,Any]],item:dict[str,Any],keys:list[str]) -> tuple[tuple[Any,...],dict[str,Any],list[dict[str,Any]]] | None:
-        """Find a safe clone source, including one-to-one dynamic key renames.
+    def _find_clone(self, amap:dict[tuple[Any,...],dict[str,Any]], item:dict[str,Any], keys:list[str]) -> tuple[tuple[Any,...],dict[str,Any],list[dict[str,Any]]] | None:
+        """Find a unique, safely reusable list item using a recursive diff.
 
-        Returns (source identity, scalar overrides, item operations). Only a
-        unique best candidate is accepted, avoiding ambiguous compiler output.
+        The previous implementation only cloned nearly identical top-level
+        mappings. Large version/service sections with nested config/list edits
+        therefore fell back to embedding the entire new item in patch.yaml.
+        Besides producing huge patches, serialising that embedded value could
+        shift comment columns. A recursive item diff keeps the source item's
+        comments/anchors/style and applies only the real changes.
         """
-        candidates=[]
-        for ident,old in amap.items():
-            old_non={k:v for k,v in old.items() if k not in keys}
-            new_non={k:v for k,v in item.items() if k not in keys}
-            if old_non==new_non:
-                candidates.append((0, DiffCompiler._version_like_distance(old, item, None, None, keys), ident, {k:deepcopy(item[k]) for k in keys if old.get(k)!=item.get(k)}, []))
+        candidates: list[tuple[int, int, tuple[Any, ...], list[dict[str, Any]]]] = []
+        saved_warnings = list(self.warnings)
+        for ident, old in amap.items():
+            nested_ops: list[dict[str, Any]] = []
+            try:
+                self._diff(old, item, '$', nested_ops)
+            except Exception:
                 continue
-            removed=[k for k in old_non if k not in new_non]
-            added=[k for k in new_non if k not in old_non]
-            common=[k for k in old_non if k in new_non]
-            changes={k:deepcopy(item[k]) for k in keys if old.get(k)!=item.get(k)}
-            changes.update({k:deepcopy(new_non[k]) for k in common if old_non[k]!=new_non[k]})
-            item_ops=[]
-            if len(removed)==len(added)==1 and old_non[removed[0]]==new_non[added[0]]:
-                item_ops=[{'op':'rename_key','path':'$','old_key':removed[0],'new_key':added[0]}]
-                score=len(changes)+1
-                distance = DiffCompiler._version_like_distance(old, item, removed[0], added[0], keys)
-                candidates.append((score,distance,ident,changes,item_ops))
+            finally:
+                # Candidate exploration must not leak warnings from rejected
+                # sources into the final compiler report.
+                self.warnings = list(saved_warnings)
+            if not nested_ops:
+                continue
+            cost = self._operation_cost(nested_ops)
+            full_cost = max(1, self._node_size(item))
+            # Reject candidates whose transformation is no smaller/safer than
+            # inserting the full item. Root-container replacement is heavily
+            # weighted by _operation_cost and naturally fails this check.
+            if cost >= full_cost:
+                continue
+            distance = self._version_like_distance(old, item, None, None, keys)
+            candidates.append((cost, distance, ident, nested_ops))
         if not candidates:
             return None
-        candidates.sort(key=lambda x:(x[0], x[1]))
-        if len(candidates)>1 and candidates[0][:2]==candidates[1][:2]:
+        candidates.sort(key=lambda x: (x[0], x[1]))
+        if len(candidates) > 1 and candidates[0][:2] == candidates[1][:2]:
             return None
-        _,_,ident,changes,item_ops=candidates[0]
-        return ident,changes,item_ops
+        _, _, ident, nested_ops = candidates[0]
+        # Keep identity overrides in the established compact `set` field. This
+        # also ensures duplicate detection sees the new identity before insert.
+        set_values: dict[str, Any] = {}
+        remaining: list[dict[str, Any]] = []
+        identity_paths = {f'$/'+str(key).replace('~','~0').replace('/','~1'): key for key in keys}
+        for operation in nested_ops:
+            key = identity_paths.get(str(operation.get('path')))
+            if operation.get('op') == 'replace' and key is not None:
+                set_values[key] = deepcopy(operation.get('value'))
+            else:
+                nested_operation = deepcopy(operation)
+                # The copy is always built from the original source item before
+                # duplicate verification, so nested renames do not require the
+                # top-level compiler's idempotent missing:skip marker.
+                if nested_operation.get('op') == 'rename_key':
+                    nested_operation.pop('missing', None)
+                remaining.append(nested_operation)
+        return ident, set_values, remaining
+
+    @staticmethod
+    def _node_size(value: Any) -> int:
+        if isinstance(value, dict):
+            return 1 + sum(DiffCompiler._node_size(k) + DiffCompiler._node_size(v) for k, v in value.items())
+        if isinstance(value, list):
+            return 1 + sum(DiffCompiler._node_size(v) for v in value)
+        return 1
+
+    @staticmethod
+    def _operation_cost(operations: list[dict[str, Any]]) -> int:
+        cost = 0
+        for op in operations:
+            name = op.get('op')
+            value = op.get('value')
+            if name == 'replace' and isinstance(value, (dict, list)):
+                cost += DiffCompiler._node_size(value) + 20
+            elif name in {'insert', 'insert_key'}:
+                cost += 2 + DiffCompiler._node_size(value)
+            else:
+                cost += 1
+            nested = op.get('item_operations')
+            if isinstance(nested, list):
+                cost += DiffCompiler._operation_cost(nested)
+        return cost
 
     @staticmethod
     def _version_like_distance(old: dict[str,Any], new: dict[str,Any], old_key: str | None, new_key: str | None, identity_keys: list[str]) -> int:

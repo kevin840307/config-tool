@@ -108,6 +108,32 @@ def get_parent(root: Any, path: str) -> tuple[Any, str | int]:
     return cur, tokens[-1]
 
 
+
+def _adjust_inline_comment_column(parent: Any, key: Any, old_value: Any, new_value: Any) -> None:
+    """Keep ruamel inline comments aligned when a scalar width changes.
+
+    Direct assignment through CommentedMap normally updates this presentation
+    metadata. Our generic path setter bypasses some of that behavior, so copied
+    items could lose one or more spaces before an inline comment.
+    """
+    if not isinstance(parent, dict) or isinstance(old_value, (dict, list)) or isinstance(new_value, (dict, list)):
+        return
+    ca = getattr(parent, 'ca', None)
+    slots = getattr(ca, 'items', {}).get(key) if ca is not None else None
+    if not slots or len(slots) <= 2 or slots[2] is None:
+        return
+    token = slots[2]
+    text = getattr(token, 'value', '')
+    if text.startswith(('\n', '\r')):
+        return
+    column = getattr(token, 'column', None)
+    if column is None:
+        return
+    try:
+        token.column = max(0, int(column) + len(str(new_value)) - len(str(old_value)))
+    except Exception:
+        pass
+
 def set_node(root: Any, path: str, value: Any, create_missing: bool = False) -> Any:
     tokens = parse_path(path)
     if not tokens:
@@ -124,7 +150,10 @@ def set_node(root: Any, path: str, value: Any, create_missing: bool = False) -> 
                     raise PathError(f"Path not found: {path!r}")
                 cur[token] = {}
             cur = cur[token]
-    cur[tokens[-1]] = value
+    final_key = tokens[-1]
+    old_value = cur.get(final_key) if isinstance(cur, dict) and final_key in cur else (cur[final_key] if isinstance(cur, list) and isinstance(final_key, int) and -len(cur) <= final_key < len(cur) else None)
+    _adjust_inline_comment_column(cur, final_key, old_value, value)
+    cur[final_key] = value
     return root
 
 

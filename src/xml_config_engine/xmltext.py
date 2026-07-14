@@ -355,12 +355,16 @@ def serialize_element(name: str, value: Any, indent: str, newline: str) -> str:
         pieces = [f'<{name}{attr_text}>']
         if text_value not in (None, ''):
             pieces.append(xml_escape_text(text_value))
+        child_line_indent = indent + '  '
         for child_name, child_value in child_items:
             values = child_value if isinstance(child_value, list) else [child_value]
             for v in values:
-                rendered = serialize_element(child_name, v, indent + '  ', newline)
-                rendered = rendered.replace(newline, newline + indent + '  ')
-                pieces.append(newline + indent + '  ' + rendered)
+                # `serialize_element` already emits nested lines using the
+                # absolute indentation passed to it. Re-indenting the returned
+                # string a second time made a newly-created section drift on
+                # the second idempotency run.
+                rendered = serialize_element(child_name, v, child_line_indent, newline)
+                pieces.append(newline + child_line_indent + rendered)
         pieces.append(newline + indent + f'</{name}>')
         return ''.join(pieces)
     if value is None:

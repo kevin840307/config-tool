@@ -12,12 +12,31 @@ coverage report -m
 目前交付包的完整測試：
 
 ```text
-114 passed
+152 passed
 `src/` 程式碼行覆蓋率：85%
-主要 compiler / folder compiler / patch engine 約為 88%～94%
+YAML diff compiler：90%
+YAML folder compiler：90%
+XML compiler：98%
+XML patch engine：88%
 ```
 
 測試數量會隨新增案例增加；驗收應以「全部通過、無跳過失敗」為準。
+
+## 大型與複雜檔案壓力驗證
+
+已加入並實際執行：
+
+- 4,092 行 YAML compiler → compact patch → apply → after 逐 byte 完全相同。
+- 2,992 行 YAML 手寫複合 operations，包含大型 dict/list、位置、pattern、copy 與 444 個原始註解。
+- 8-document、2,231 行 YAML，保留 208 個註解與 document 排版。
+- 1,548 行 child-folder rules + 外部 variable-map + FAB/ENV scope。
+- 1,600+ 行 UTF-8 BOM/CRLF YAML，包含新註解與新 section。
+- 32+ 個大型 YAML 檔案的 patch/create/delete/unchanged，逐檔 byte 比對。
+- 1,568 行 XML surgical operations。
+- 1,968 行 XML compiler，包含 BOM、CRLF、comment 位置、create/delete。
+- 所有大型可重複操作均驗證第二次執行 byte-identical。
+
+詳細案例、驗證方式與本輪修正見 [大型與複雜設定驗證報告](LARGE_SCALE_VALIDATION_zh-TW.md)。
 
 ## YAML operation
 
@@ -130,6 +149,13 @@ YAML 與 XML 均測試：
 - YAML 產生的 report 在第二次冪等性檢查被誤視為業務 YAML。
 - CLI `--var` 在 lint、run-folder 與 idempotency 間未完全一致。
 - YAML UTF-8 BOM 未在所有寫入路徑保留。
+- 巢狀結構更新可能因容器重建而遺失內部註解。
+- 新增 mapping section 時，下一個 sibling 的前置註解可能位置錯誤或遺失。
+- variable-map 模板值曾錯誤繼承 config 模板字串的引號。
+- YAML multi-document 與新增註解情境需要 exact-byte fallback。
+- XML predicate parent 下新增最後一層 section。
+- XML 新增巢狀 section 的第二次執行縮排漂移。
+- XML compact create 的 BOM/CRLF exact preservation。
 
 ## Missing policy 與大型 section selector
 

@@ -41,6 +41,8 @@ python yaml_config_tool.py compile-folder ..\before-folder ..\after-folder gener
 
 expanded 模式會額外產生 `manifest.yaml`、`configs/` 與必要 payload。
 
+Compiler 會先嘗試可閱讀的結構化 operations，並實際對來源檔執行後與 after 做 byte-level 比對。若新註解、multi-document 排版、BOM、LF/CRLF 或其他格式無法精確重現，會自動改用同一份 `patch.yaml` 內的 exact-byte fallback。
+
 套用與驗證：
 
 ```bat
@@ -156,4 +158,4 @@ python -m pip install -r requirements-dev.txt
 RUN_TESTS_WINDOWS.cmd
 ```
 
-Linux 使用 `./RUN_TESTS_LINUX.sh`。完整驗收範圍見 [測試矩陣](TEST_MATRIX_zh-TW.md)。
+Linux 使用 `./RUN_TESTS_LINUX.sh`。完整驗收範圍見 [測試矩陣](TEST_MATRIX_zh-TW.md)，上千行案例見 [大型與複雜設定驗證報告](LARGE_SCALE_VALIDATION_zh-TW.md)。

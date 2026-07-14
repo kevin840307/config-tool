@@ -29,6 +29,8 @@ generated/
 
 日常只需閱讀、修改與版控 `patch.yaml`。
 
+Compiler 會實際套用產生的 operations 並比對 after 的原始 bytes；若註解、位置、BOM、LF/CRLF 或特殊格式無法由最小 operations 精確重現，會在同一份 `patch.yaml` 中使用有標記的 exact-byte fallback。
+
 需要逐檔 config 與稽核資訊時才使用：
 
 ```bat
@@ -85,3 +87,5 @@ examples/folder-compact-mapping/xml/
 - `docs/CLI_REFERENCE_zh-TW.md`：CLI 指令
 - `docs/XML_USER_GUIDE_zh-TW.md`：XML 使用方式
 - `docs/TROUBLESHOOTING_zh-TW.md`：常見錯誤
+- `docs/TEST_MATRIX_zh-TW.md`：完整驗收範圍
+- `docs/LARGE_SCALE_VALIDATION_zh-TW.md`：上千行 YAML/XML、註解、位置與 exact-byte 壓力驗證

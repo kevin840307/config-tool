@@ -502,6 +502,22 @@ unchanged   未改變（通常只記摘要）
 
 預設 generated 資料夾內只有 `patch.yaml`。`apply-folder` 可直接傳入 generated 資料夾或 `generated/patch.yaml`。需要舊式 manifest/configs 時使用 `compile-folder --layout expanded`。
 
+### Compiler exact-byte payload
+
+`compile-folder` 會把產生的 operations 實際套用一次，並與 after 檔案比較原始 bytes。若結構正確但註解、位置、BOM、LF/CRLF、multi-document 排版或 XML mixed content 無法逐 byte 重現，compact patch 可能包含：
+
+```yaml
+replace_bytes_base64: ...
+```
+
+新增檔案可能包含：
+
+```yaml
+create_bytes_base64: ...
+```
+
+這兩個欄位是 compiler 自動產生的 exact payload，不是日常手寫 operation，通常不應人工修改。它們仍位於唯一的 `patch.yaml`，不會額外產生 payload 檔案。
+
 
 ## Missing policy、key/name selector 與大型 section
 

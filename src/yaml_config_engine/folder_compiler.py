@@ -8,6 +8,7 @@ from typing import Any
 import fnmatch
 import shutil
 import os
+import base64
 
 from .diff_compiler import DiffCompiler
 from .engine import YamlPatchEngine
@@ -143,15 +144,21 @@ class FolderCompiler:
             cfg = load_one(output_root / entry.config)
             operations = cfg.get('operations', [])
             if entry.action == 'create':
-                files[entry.relative_path] = {
-                    'create_documents': operations[0].get('value', []) if operations else [],
-                    'strategy': entry.strategy,
-                }
-            elif cfg.get('folder_action') == 'replace_all_documents':
-                files[entry.relative_path] = {
-                    'replace_documents': operations[0].get('value', []) if operations else [],
-                    'strategy': entry.strategy,
-                }
+                item = {'strategy': entry.strategy}
+                if cfg.get('yaml_exact_bytes_base64'):
+                    item['create_bytes_base64'] = cfg['yaml_exact_bytes_base64']
+                else:
+                    item['create_documents'] = operations[0].get('value', []) if operations else []
+                files[entry.relative_path] = item
+            elif cfg.get('folder_action') in {'replace_all_documents', 'replace_exact_bytes'}:
+                item = {'strategy': entry.strategy}
+                if cfg.get('yaml_exact_bytes_base64'):
+                    item['replace_bytes_base64'] = cfg['yaml_exact_bytes_base64']
+                else:
+                    item['replace_documents'] = operations[0].get('value', []) if operations else []
+                if entry.warnings:
+                    item['warnings'] = entry.warnings
+                files[entry.relative_path] = item
             else:
                 item: dict[str, Any] = {'ops': [self._compact_operation(op) for op in operations]}
                 if entry.strategy:
@@ -194,6 +201,11 @@ class FolderCompiler:
             if spec.get('delete') is True:
                 if target.exists():
                     target.unlink()
+                continue
+            if 'create_bytes_base64' in spec or 'replace_bytes_base64' in spec:
+                encoded = spec.get('create_bytes_base64', spec.get('replace_bytes_base64'))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(base64.b64decode(encoded))
                 continue
             if 'create_documents' in spec or 'replace_documents' in spec:
                 docs = spec.get('create_documents', spec.get('replace_documents'))
@@ -261,6 +273,7 @@ class FolderCompiler:
                     'operations': [{'id': 'create-document', 'op': 'replace', 'path': '$', 'value': load_all(b)}],
                     'folder_action': 'create_file',
                     'document_mode': 'all',
+                    'yaml_exact_bytes_base64': base64.b64encode(b.read_bytes()).decode('ascii'),
                 }
                 cfg_path = output_root / cfg_rel
                 cfg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -286,7 +299,34 @@ class FolderCompiler:
                 cfg = compiled.config
                 strategy = compiled.strategy
                 verified_one = compiled.verified
-                warnings = compiled.warnings
+                warnings = list(compiled.warnings)
+                # Structural verification alone cannot prove that comments,
+                # quote style, line endings, BOM, and exact insertion position
+                # reproduce the supplied after-file. Execute the generated
+                # config against the real source bytes; if even one byte differs,
+                # use an explicit exact-byte fallback in the same single patch.
+                with TemporaryDirectory(prefix='yaml-file-exact-verify-') as tmp:
+                    candidate = Path(tmp) / a.name
+                    shutil.copy2(a, candidate)
+                    try:
+                        self.engine.apply_file(candidate, cfg, candidate)
+                        exact_match = candidate.read_bytes() == b.read_bytes()
+                    except Exception as exc:
+                        exact_match = False
+                        warnings.append(f'Generated operations could not be byte-verified: {exc}')
+                if not exact_match:
+                    cfg = {
+                        'version': 1,
+                        'options': {'atomic_write': True},
+                        'operations': [],
+                        'folder_action': 'replace_exact_bytes',
+                        'yaml_exact_bytes_base64': base64.b64encode(b.read_bytes()).decode('ascii'),
+                    }
+                    strategy = 'replace-entire-file-exact'
+                    verified_one = True
+                    warnings.append(
+                        'Generated operations did not reproduce comments/formatting byte-for-byte; exact-byte fallback used.'
+                    )
             else:
                 cfg = {
                     'version': 1,
@@ -294,6 +334,7 @@ class FolderCompiler:
                     'operations': [{'id': 'replace-documents', 'op': 'replace', 'path': '$', 'value': b_docs}],
                     'folder_action': 'replace_all_documents',
                     'document_mode': 'all',
+                    'yaml_exact_bytes_base64': base64.b64encode(b.read_bytes()).decode('ascii'),
                 }
                 strategy = 'replace-all-documents'
                 verified_one = True
@@ -358,13 +399,19 @@ class FolderCompiler:
             cfg_raw = load_one(cfg_path)
             folder_action = cfg_raw.get('folder_action')
             if action == 'create':
-                docs = cfg_raw['operations'][0]['value']
                 target.parent.mkdir(parents=True, exist_ok=True)
-                dump_all(docs, target)
-            elif folder_action == 'replace_all_documents':
-                docs = cfg_raw['operations'][0]['value']
+                if cfg_raw.get('yaml_exact_bytes_base64'):
+                    target.write_bytes(base64.b64decode(cfg_raw['yaml_exact_bytes_base64']))
+                else:
+                    docs = cfg_raw['operations'][0]['value']
+                    dump_all(docs, target)
+            elif folder_action in {'replace_all_documents', 'replace_exact_bytes'}:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                dump_all(docs, target)
+                if cfg_raw.get('yaml_exact_bytes_base64'):
+                    target.write_bytes(base64.b64decode(cfg_raw['yaml_exact_bytes_base64']))
+                else:
+                    docs = cfg_raw['operations'][0]['value']
+                    dump_all(docs, target)
             else:
                 self.engine.apply_file(target, cfg_path, target, variables or {})
 

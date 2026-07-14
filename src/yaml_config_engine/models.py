@@ -107,9 +107,9 @@ class EngineConfig(BaseModel):
                 raise ValueError(f'operations[{index}] {name} requires value or values')
             if name in {'copy_item','copy_item_to_node'} and 'source' not in op:
                 raise ValueError(f'operations[{index}] {name} requires source/from')
-            if name == 'copy_item' and 'item_operations' in op:
+            if name in {'copy_item', 'copy_item_to_node', 'update_item'} and 'item_operations' in op:
                 if not isinstance(op['item_operations'], list):
-                    raise ValueError(f'operations[{index}] copy_item.item_operations must be a list')
+                    raise ValueError(f'operations[{index}] {name}.item_operations must be a list')
                 for nested_index, nested in enumerate(op['item_operations']):
                     if not isinstance(nested, dict) or nested.get('op') not in SUPPORTED_OPS:
                         raise ValueError(f'operations[{index}].item_operations[{nested_index}] has invalid op')
