@@ -500,7 +500,7 @@ delete      刪除檔案
 unchanged   未改變（通常只記摘要）
 ```
 
-可直接把 `generated/patch.yaml` 傳給 `apply-folder`；舊的 generated 資料夾入口仍相容。
+預設 generated 資料夾內只有 `patch.yaml`。`apply-folder` 可直接傳入 generated 資料夾或 `generated/patch.yaml`。需要舊式 manifest/configs 時使用 `compile-folder --layout expanded`。
 
 
 ## Missing policy、key/name selector 與大型 section
@@ -539,3 +539,35 @@ XML direct child element 可使用 `name` / `name_pattern`；`key` / `key_patter
 YAML path 支援 `*`、`[*]`、`[N]`、負索引；YAML `[N]` 是 0-based。XML path 支援 `*`、`[*]`、`[N]`、`[@attr='value']`、`[child='value']`；XML `[N]` 是 1-based。
 
 完整範例請參考 `SECTION_CONFIG_EXAMPLES_zh-TW.md` 的「Wildcard、索引與陣列值匹配」。
+
+
+## Compact folder patch 搭配 variable-map.yaml
+
+```yaml
+version: 1
+kind: yaml-folder-patch-compact
+variable_map_file: variable-map.yaml
+files:
+  FAB14-FZ1/STAGING/app/application.yaml:
+    ops:
+      - set: [$.server.host, "{{ HOST }}"]
+      - op: set
+        path: $.runtime
+        missing: create
+        value:
+          timeout: "{{ TIMEOUT }}"
+          retry: [1, 5, 15]
+```
+
+外部檔：
+
+```yaml
+variable_map:
+  FAB14:STAGING:
+    HOST: staging-host
+    TIMEOUT: 45
+  FAB14-FZ1:STAGING:
+    HOST: fz1-staging-host
+```
+
+外部檔路徑以 `patch.yaml` 所在目錄為基準。CLI `--var` 仍具有最高優先權。

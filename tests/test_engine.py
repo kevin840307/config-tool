@@ -118,7 +118,7 @@ def test_folder_compiler_complex_tree(tmp_path):
         ap = before/rel; bp = after/rel
         ap.parent.mkdir(parents=True, exist_ok=True); bp.parent.mkdir(parents=True, exist_ok=True)
         ap.write_text(a, encoding='utf-8'); bp.write_text(b, encoding='utf-8')
-    result = FolderCompiler().compile_folder(before, after, generated)
+    result = FolderCompiler().compile_folder(before, after, generated, layout='expanded')
     assert result.verified
     FolderCompiler().apply_manifest(before, generated, output)
     assert FolderCompiler().verify_manifest(before, generated, after)

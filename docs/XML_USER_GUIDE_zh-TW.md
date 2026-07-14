@@ -27,7 +27,7 @@ python xml_config_tool.py verify before.xml config.yaml after.xml
 
 ```bat
 python xml_config_tool.py compile-folder before after generated
-python xml_config_tool.py apply-folder before generated\patch.yaml output
+python xml_config_tool.py apply-folder before generated output
 python xml_config_tool.py verify-folder before generated after
 ```
 

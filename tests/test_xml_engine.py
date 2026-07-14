@@ -145,3 +145,43 @@ def test_xml_output_line_ending_crlf(tmp_path):
     payload = out.read_bytes()
     assert b'\r\n' in payload
     assert b'\n' not in payload.replace(b'\r\n', b'')
+
+
+def test_xml_compile_folder_default_outputs_only_patch_and_applies(tmp_path):
+    from xml_config_engine.folder_compiler import XmlFolderCompiler
+    before = tmp_path / 'before'; after = tmp_path / 'after'; generated = tmp_path / 'generated'; output = tmp_path / 'output'
+    before.mkdir(); after.mkdir()
+    (before / 'app.xml').write_text('<root><port>8080</port></root>\n', encoding='utf-8')
+    (after / 'app.xml').write_text('<root><port>9090</port></root>\n', encoding='utf-8')
+    result = XmlFolderCompiler().compile_folder(before, after, generated)
+    assert result.verified
+    assert sorted(p.name for p in generated.iterdir()) == ['patch.yaml']
+    XmlFolderCompiler().apply_folder(before, generated, output)
+    assert '<port>9090</port>' in (output / 'app.xml').read_text(encoding='utf-8')
+
+
+def test_xml_compact_patch_supports_external_variable_map(tmp_path):
+    from xml_config_engine.folder_compiler import XmlFolderCompiler
+    before = tmp_path / 'before'; generated = tmp_path / 'generated'; output = tmp_path / 'output'
+    target = before / 'FAB14-FZ1' / 'STAGING' / 'app' / 'application.xml'
+    target.parent.mkdir(parents=True)
+    target.write_text('<configuration><server host="old"/></configuration>\n', encoding='utf-8')
+    generated.mkdir()
+    (generated / 'variable-map.yaml').write_text('FAB14:STAGING:\n  HOST: staging-xml-host\n', encoding='utf-8')
+    (generated / 'patch.yaml').write_text(
+        '''version: 1
+kind: xml-folder-patch-compact
+variable_map_file: variable-map.yaml
+files:
+  FAB14-FZ1/STAGING/app/application.xml:
+    config:
+      version: 1
+      format: xml
+      operations:
+        - op: set
+          path: /configuration/server/@host
+          value: "{{ HOST }}"
+summary: {patch: 1, create: 0, delete: 0, unchanged: 0}
+''', encoding='utf-8')
+    XmlFolderCompiler().apply_folder(before, generated, output)
+    assert 'host="staging-xml-host"' in (output / 'FAB14-FZ1' / 'STAGING' / 'app' / 'application.xml').read_text(encoding='utf-8')

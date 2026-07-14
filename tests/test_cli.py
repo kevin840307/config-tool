@@ -18,7 +18,7 @@ def test_cli_compile_folder_apply_and_verify(tmp_path):
     (after/'FAB14-FZ1'/'STAGING'/'app'/'new.yaml').write_text('new: true\n', encoding='utf-8')
     (before/'FAB14-FZ1'/'STAGING'/'app'/'old.yaml').write_text('old: true\n', encoding='utf-8')
 
-    assert main(['compile-folder', str(before), str(after), str(generated)]) == 0
+    assert main(['compile-folder', str(before), str(after), str(generated), '--layout', 'expanded']) == 0
     assert (generated/'manifest.yaml').exists()
     assert main(['verify-folder', str(before), str(generated), str(after)]) == 0
     assert main(['apply-folder', str(before), str(generated), str(output)]) == 0

@@ -183,7 +183,7 @@ class FolderCompiler:
         source_root = Path(source_root).resolve()
         patch_path = Path(patch_path).resolve()
         output_root = Path(output_root).resolve()
-        patch = load_one(patch_path)
+        patch = load_config_with_variable_maps(patch_path)
         if patch.get('kind') != 'yaml-folder-patch-compact':
             raise ValueError(f'Not a compact folder patch: {patch_path}')
         if output_root.exists():
@@ -201,8 +201,21 @@ class FolderCompiler:
                 dump_all(docs, target)
                 continue
             operations = [self._expand_compact_operation(op, i) for i, op in enumerate(spec.get('ops', []), 1)]
-            cfg = {'version': 1, 'options': {'atomic_write': True}, 'operations': operations}
-            self.engine.apply_file(target, cfg, target, variables or {})
+            parts = Path(rel_text).parts
+            fab = parts[0] if len(parts) >= 3 else ''
+            env = parts[1] if len(parts) >= 3 else ''
+            scope_vars, _ = resolve_scope_variables(patch.get('variable_map', {}), fab, env)
+            merged_vars = dict(patch.get('variables') or {})
+            merged_vars.update(scope_vars)
+            merged_vars.update(variables or {})
+            cfg = {
+                'version': 1,
+                'options': patch.get('options') or {'atomic_write': True},
+                'variables': patch.get('variables') or {},
+                'variable_map': patch.get('variable_map') or {},
+                'operations': operations,
+            }
+            self.engine.apply_file(target, cfg, target, merged_vars)
 
     def compile_folder(
         self,
@@ -217,12 +230,17 @@ class FolderCompiler:
         path_allow: list[str] | None = None, path_deny: list[str] | None = None,
         fab_allow_prefix: list[str] | None = None, fab_deny_prefix: list[str] | None = None,
         env_allow: list[str] | None = None, env_deny: list[str] | None = None,
+        layout: str = 'compact',
     ) -> FolderCompileResult:
         before_root = Path(before_root).resolve()
         after_root = Path(after_root).resolve()
         output_root = Path(output_root).resolve()
         include = include or ['**/*.yaml', '**/*.yml', '*.yaml', '*.yml']
         exclude = exclude or ['**/.git/**', '**/.vs/**', '**/__pycache__/**', '**/backup/**']
+        if layout not in {'compact', 'expanded'}:
+            raise ValueError("layout must be 'compact' or 'expanded'")
+        if output_root.exists():
+            shutil.rmtree(output_root)
         output_root.mkdir(parents=True, exist_ok=True)
 
         collect_kwargs = dict(path_allow=path_allow, path_deny=path_deny,
@@ -297,6 +315,12 @@ class FolderCompiler:
         verified_all = self.verify_manifest(before_root, output_root, after_root) if verify else all(x.verified for x in entries)
         manifest['verified'] = verified_all
         dump_one(manifest, manifest_path)
+        if layout == 'compact':
+            configs_dir = output_root / 'configs'
+            if configs_dir.exists():
+                shutil.rmtree(configs_dir)
+            manifest_path.unlink(missing_ok=True)
+            manifest_path = compact_path
         return FolderCompileResult(manifest_path, entries, verified_all, compact_path)
 
     def apply_manifest(
@@ -530,10 +554,17 @@ class FolderCompiler:
         with TemporaryDirectory(prefix='yaml-folder-verify-') as tmp:
             actual_root = Path(tmp) / 'actual'
             self.apply_manifest(source_root, generated_root, actual_root)
-            manifest = load_one(Path(generated_root) / 'manifest.yaml')
-            include = manifest.get('filters', {}).get('include') or ['**/*.yaml', '**/*.yml', '*.yaml', '*.yml']
-            exclude = manifest.get('filters', {}).get('exclude') or []
-            filters = manifest.get('filters', {})
+            generated_path = Path(generated_root)
+            manifest_path = generated_path / 'manifest.yaml' if generated_path.is_dir() else None
+            if manifest_path is not None and manifest_path.exists():
+                manifest = load_one(manifest_path)
+                include = manifest.get('filters', {}).get('include') or ['**/*.yaml', '**/*.yml', '*.yaml', '*.yml']
+                exclude = manifest.get('filters', {}).get('exclude') or []
+                filters = manifest.get('filters', {})
+            else:
+                include = ['**/*.yaml', '**/*.yml', '*.yaml', '*.yml']
+                exclude = []
+                filters = {}
             kwargs = dict(path_allow=filters.get('path_allow'), path_deny=filters.get('path_deny'),
                 fab_allow_prefix=filters.get('fab_allow_prefix'), fab_deny_prefix=filters.get('fab_deny_prefix'),
                 env_allow=filters.get('env_allow'), env_deny=filters.get('env_deny'))

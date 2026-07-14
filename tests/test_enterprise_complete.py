@@ -359,7 +359,7 @@ def test_compile_folder_complex_multiversion_yaml_and_xml(tmp_path: Path):
     dump_one(upgraded, y_after / 'child/app.yaml')
     (y_before / 'child/delete.yaml').write_text('old: true\n', encoding='utf-8')
     (y_after / 'child/create.yaml').write_text('new: true\n', encoding='utf-8')
-    compiled = FolderCompiler().compile_folder(y_before, y_after, y_gen)
+    compiled = FolderCompiler().compile_folder(y_before, y_after, y_gen, layout='expanded')
     assert compiled.verified
     FolderCompiler().apply_manifest(y_before, y_gen, y_out)
     assert FolderCompiler().verify_manifest(y_before, y_gen, y_after)

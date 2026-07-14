@@ -28,6 +28,22 @@ Windows 可改用 `RUN_WINDOWS.cmd` / `RUN_XML_WINDOWS.cmd`；Linux 可改用 `R
 
 XML 另有 `capabilities` 可輸出 YAML/XML 對齊能力。
 
+### 輸出模式
+
+預設只產生 `generated/patch.yaml`：
+
+```bat
+python yaml_config_tool.py compile-folder before after generated
+```
+
+需要舊式逐檔產物時：
+
+```bat
+python yaml_config_tool.py compile-folder before after generated --layout expanded
+```
+
+XML 的 `compile-folder` 也支援相同的 `--layout compact|expanded`。
+
 ## 單檔
 
 ```bat
@@ -63,7 +79,7 @@ YAML `compile` 可加：
 
 ```bat
 python yaml_config_tool.py compile-folder before after generated
-python yaml_config_tool.py apply-folder before generated\patch.yaml output
+python yaml_config_tool.py apply-folder before generated output
 python yaml_config_tool.py verify-folder before generated after
 ```
 

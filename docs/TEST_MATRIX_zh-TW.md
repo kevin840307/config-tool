@@ -80,7 +80,9 @@ capture / copy_node / move_node / copy_item_to_node
 - `FAB14:STAGING`、`FAB14-FZ1:STAGING`
 - 內嵌/外部/多份 variable map 與 CLI `--var`
 - compile-folder 的 patch/create/delete/unchanged
-- compact `patch.yaml` 與 expanded manifest 相容
+- 預設只輸出 compact `patch.yaml`
+- `--layout expanded` 與舊 manifest/configs 相容
+- compact patch 搭配外部 `variable-map.yaml`（YAML/XML）
 - 大量多檔 child rules
 - report 檔不會在第二次執行被當成業務 config
 - apply → parse → idempotency

@@ -62,11 +62,12 @@ def main(argv: list[str] | None = None) -> int:
     v = sub.add_parser("verify", help="Verify one generated config")
     v.add_argument("before"); v.add_argument("config"); v.add_argument("expected")
 
-    cf = sub.add_parser("compile-folder", help="Generate compact patch.yaml plus backward-compatible expanded artifacts")
+    cf = sub.add_parser("compile-folder", help="Generate one patch.yaml by default; use --layout expanded for detailed artifacts")
     cf.add_argument("before_root"); cf.add_argument("after_root"); cf.add_argument("output_root")
     add_patterns(cf)
     cf.add_argument("--include-unchanged", action="store_true")
     cf.add_argument("--no-verify", action="store_true")
+    cf.add_argument("--layout", choices=["compact", "expanded"], default="compact")
 
     af = sub.add_parser("apply-folder", help="Apply a generated folder manifest")
     af.add_argument("source_root"); af.add_argument("generated_root"); af.add_argument("output_root")
@@ -152,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
             fab_deny_prefix=args.fab_deny_prefix or None,
             env_allow=args.env_allow or None,
             env_deny=args.env_deny or None,
+            layout=args.layout,
         )
         summary = {
             "verified": result.verified,

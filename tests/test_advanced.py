@@ -151,6 +151,7 @@ def test_folder_enterprise_allow_deny_filters(tmp_path):
     out = tmp_path / 'generated'
     result = FolderCompiler().compile_folder(
         before, after, out,
+        layout='expanded',
         path_allow=['eocap-app1/application.yaml', 'eocap-app2/application.yaml'],
         path_deny=['eocap-app2/**'],
         fab_allow_prefix=['FAB14'], fab_deny_prefix=['FAB14-Z'],

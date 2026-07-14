@@ -29,7 +29,7 @@ def main(argv: list[str] | None=None) -> int:
     sub=p.add_subparsers(dest='cmd',required=True)
     a=sub.add_parser('apply'); a.add_argument('source'); a.add_argument('config'); a.add_argument('-o','--output'); a.add_argument('--var',action='append',default=[]); a.add_argument('--dry-run',action='store_true')
     c=sub.add_parser('compile'); c.add_argument('before'); c.add_argument('after'); c.add_argument('-o','--output',required=True)
-    cf=sub.add_parser('compile-folder'); cf.add_argument('before_root'); cf.add_argument('after_root'); cf.add_argument('output_root'); cf.add_argument('--include-unchanged',action='store_true'); cf.add_argument('--no-verify',action='store_true')
+    cf=sub.add_parser('compile-folder'); cf.add_argument('before_root'); cf.add_argument('after_root'); cf.add_argument('output_root'); cf.add_argument('--include-unchanged',action='store_true'); cf.add_argument('--no-verify',action='store_true'); cf.add_argument('--layout',choices=['compact','expanded'],default='compact')
     af=sub.add_parser('apply-folder'); af.add_argument('source_root'); af.add_argument('generated_root'); af.add_argument('output_root'); af.add_argument('--var',action='append',default=[])
     vf=sub.add_parser('verify-folder'); vf.add_argument('source_root'); vf.add_argument('generated_root'); vf.add_argument('expected_root')
     idem=sub.add_parser('check-idempotency'); idem.add_argument('source_root'); idem.add_argument('config'); idem.add_argument('--var',action='append',default=[])
@@ -49,8 +49,8 @@ def main(argv: list[str] | None=None) -> int:
         r=XmlDiffCompiler().compile_files(args.before,args.after); dump_one(r.config,args.output)
         print(json.dumps({'verified':r.verified,'structural_verified':r.verified,'strategy':r.strategy,'output':args.output,'warnings':r.warnings},ensure_ascii=False)); return 0 if r.verified else 2
     if args.cmd=='compile-folder':
-        r=XmlFolderCompiler().compile_folder(args.before_root,args.after_root,args.output_root,args.include_unchanged,not args.no_verify)
-        print(json.dumps({'verified':r.verified,'manifest':str(r.manifest_path),'counts':{k:sum(1 for e in r.entries if e['action']==k) for k in ('patch','create','delete','unchanged')}},ensure_ascii=False)); return 0 if r.verified else 2
+        r=XmlFolderCompiler().compile_folder(args.before_root,args.after_root,args.output_root,args.include_unchanged,not args.no_verify,args.layout)
+        print(json.dumps({'verified':r.verified,'patch':str(r.compact_path) if r.compact_path else None,'primary':str(r.manifest_path),'counts':{k:sum(1 for e in r.entries if e['action']==k) for k in ('patch','create','delete','unchanged')}},ensure_ascii=False)); return 0 if r.verified else 2
     if args.cmd=='apply-folder':
         r=XmlFolderCompiler().apply_folder(args.source_root,args.generated_root,args.output_root,parse_vars(args.var)); print(json.dumps(r,ensure_ascii=False)); return 0
     if args.cmd=='verify-folder':

@@ -30,16 +30,21 @@ python yaml_config_tool.py compile-folder ..\before-folder ..\after-folder gener
 
 ```text
 generated/
-├─ patch.yaml       # 建議保存與審查
-├─ manifest.yaml    # 相容/稽核資訊
-├─ configs/         # 展開後的逐檔 config
-└─ payloads/        # 新增或需精確保留的內容
+└─ patch.yaml       # 預設唯一產物，供閱讀、修改、套用與版控
 ```
+
+需要逐檔稽核資料時，才加上：
+
+```bat
+python yaml_config_tool.py compile-folder ..\before-folder ..\after-folder generated --layout expanded
+```
+
+expanded 模式會額外產生 `manifest.yaml`、`configs/` 與必要 payload。
 
 套用與驗證：
 
 ```bat
-python yaml_config_tool.py apply-folder ..\before-folder generated\patch.yaml ..\output-folder
+python yaml_config_tool.py apply-folder ..\before-folder generated ..\output-folder
 python yaml_config_tool.py verify-folder ..\before-folder generated ..\after-folder
 ```
 
@@ -47,7 +52,7 @@ python yaml_config_tool.py verify-folder ..\before-folder generated ..\after-fol
 
 ```bat
 python xml_config_tool.py compile-folder ..\before-folder ..\after-folder generated-xml
-python xml_config_tool.py apply-folder ..\before-folder generated-xml\patch.yaml ..\output-folder
+python xml_config_tool.py apply-folder ..\before-folder generated-xml ..\output-folder
 python xml_config_tool.py verify-folder ..\before-folder generated-xml ..\after-folder
 ```
 
