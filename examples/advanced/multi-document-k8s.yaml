@@ -1,0 +1,15 @@
+version: 1
+# 只修改多文件 YAML 中符合條件的 Deployment
+documents:
+  match:
+    kind: Deployment
+    metadata.name: api
+
+operations:
+  - op: update_item
+    target: $.spec.template.spec.containers
+    find:
+      name: api
+    change:
+      image: "registry/api:{{ VERSION }}"
+    expect_matches: 1

@@ -1,0 +1,19 @@
+version: 1
+operations:
+  - op: merge
+    path: $.settings
+    strategy: keep_existing
+    value:
+      timeout: 60
+      retries: 3
+
+  - op: merge
+    path: $.tags
+    strategy: unique
+    value: [nightly, regression]
+
+  - op: merge
+    path: $.legacy
+    strategy: delete_null
+    value:
+      obsolete: null

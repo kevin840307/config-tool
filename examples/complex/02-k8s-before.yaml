@@ -1,0 +1,16 @@
+# deployment comment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "ocap-api"
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: "registry/ocap:2025.6"
+          env:
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: REGION
+              value: "TWN"

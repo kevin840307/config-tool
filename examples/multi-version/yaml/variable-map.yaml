@@ -1,0 +1,7 @@
+variable_map:
+  FAB14:
+    NEW_VERSION: "2026.07"
+    OLD_TIMEOUT: 45
+  FAB14:STAGING:
+    NEW_RETRY: 5
+    NEW_FEATURE: staging-feature

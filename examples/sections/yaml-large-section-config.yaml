@@ -1,0 +1,32 @@
+version: 1
+options:
+  yaml_output:
+    mapping: 2
+    sequence: 4
+    offset: 2
+    line_ending: preserve
+operations:
+  - op: set
+    path: $.applications.order-service
+    missing: create
+    value:
+      image: {repository: registry/order, tag: 2.4.0}
+      replicas: 3
+      env:
+        - {name: JAVA_OPTS, value: -Xms512m -Xmx1g}
+        - {name: FEATURE_MODE, value: strict}
+      resources:
+        requests: {cpu: 250m, memory: 512Mi}
+        limits: {cpu: "1", memory: 1Gi}
+      routes:
+        - {path: /orders, methods: [GET, POST]}
+        - {path: "/orders/{id}", methods: [GET, PUT, DELETE]}
+  - op: update_item
+    path: $.components
+    name_pattern: "api-*"
+    missing: skip
+    on_multiple_matches: all
+    set:
+      config.timeout: 45
+      config.retry: {count: 5, backoff: [1, 5, 15]}
+      config.circuitBreaker: {enabled: true, failureThreshold: 10}

@@ -1,0 +1,18 @@
+# 此檔為操作手冊範例；CLI 對應參數如下。
+root_layout: "{FAB}/{ENV}/..."
+path_allow:
+  - "eocap-app1/application.yaml"
+  - "eocap-app2/application.yaml"
+path_deny:
+  - "**/backup/**"
+  - "eocap-app2/legacy/**"
+fab_allow_prefix:
+  - "FAB14"
+  - "FAB18"
+fab_deny_prefix:
+  - "FAB14-OLD"
+env_allow:
+  - "STAGING"
+  - "PROD"
+env_deny:
+  - "DEV"

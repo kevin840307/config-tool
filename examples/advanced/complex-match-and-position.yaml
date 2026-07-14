@@ -1,0 +1,19 @@
+version: 1
+operations:
+  - id: insert-after-fab14-api
+    op: insert
+    target: $.services
+    after:
+      name:
+        $regex: '^api-[0-9]+$'
+      fab:
+        $starts_with: FAB14
+      priority:
+        $between: [10, 99]
+    value:
+      name: worker-new
+      fab: FAB14-FZ1
+      priority: 50
+    duplicate:
+      unique_by: [name, fab]
+      policy: skip
