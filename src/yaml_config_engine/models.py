@@ -6,7 +6,7 @@ SUPPORTED_OPS = {
     'set','replace','remove','merge','rename_key','insert_key','copy_key','move_key',
     'append','prepend','insert','insert_at','insert_before','insert_after',
     'update_item','upsert_item','remove_item','move_item','copy_item','capture',
-    'copy_node','move_node','copy_item_to_node'
+    'copy_node','move_node','copy_item_to_node','replace_value','replace_text_value'
 }
 
 
@@ -114,7 +114,8 @@ class EngineConfig(BaseModel):
                     if not isinstance(nested, dict) or nested.get('op') not in SUPPORTED_OPS:
                         raise ValueError(f'operations[{index}].item_operations[{nested_index}] has invalid op')
             if name in {'update_item','remove_item'} and 'match' not in op and 'name' not in op and 'name_pattern' not in op:
-                raise ValueError(f'operations[{index}] {name} requires match/find/name/name_pattern')
+                if not (name == 'update_item' and op.get('expect_matches') == -1):
+                    raise ValueError(f'operations[{index}] {name} requires match/find/name/name_pattern, or update_item expect_matches: -1')
             if name == 'move_item' and 'match' not in op and 'source' not in op:
                 raise ValueError(f'operations[{index}] move_item requires match/find or source')
             if name == 'insert_key' and 'key' not in op:

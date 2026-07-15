@@ -20,7 +20,7 @@ def _missing_policy(spec: dict[str, Any], *, allow_create: bool = True) -> str:
         if zero_policy in {"ignore", "skip"}:
             policy = "skip"
         else:
-            policy = "create" if legacy else "error"
+            policy = "create" if legacy else "skip"
     else:
         policy = str(explicit).lower()
         if policy not in {"error", "skip", "create"}:
@@ -69,9 +69,13 @@ def _require_matches(indices: list[int], spec: dict[str, Any], label: str = "mat
     expected = spec.get("expect_matches")
     if expected is None:
         expected = spec.get("expect", {}).get("matches") if isinstance(spec.get("expect"), dict) else None
-    if expected is not None and len(indices) != expected:
+    # expect_matches: -1 explicitly means "accept every current match".
+    # It is useful for update_item without a match selector and also suppresses
+    # the normal multiple-match safety error.
+    all_matches = expected == -1
+    if expected is not None and not all_matches and len(indices) != expected:
         raise MatchError(f"{label}: expected {expected} matches, got {len(indices)}")
-    if spec.get("on_multiple_matches", "error") == "error" and len(indices) > 1:
+    if not all_matches and spec.get("on_multiple_matches", "error") == "error" and len(indices) > 1:
         raise MatchError(f"{label}: multiple matches ({len(indices)})")
 
 
@@ -125,6 +129,61 @@ def _merge(dst: Any, src: Any, strategy: str = "overwrite") -> Any:
                 if item not in dst: dst.append(deepcopy(item))
             return dst
     return deepcopy(src)
+
+
+
+def _replace_string_value(current: Any, spec: dict[str, Any]) -> Any:
+    if not isinstance(current, str):
+        raise OperationError("replace_value target must be a string scalar")
+    search = spec.get("search", spec.get("old"))
+    if search is None:
+        raise OperationError("replace_value requires search (or old)")
+    replacement = spec.get("replacement", spec.get("new", ""))
+    mode = str(spec.get("pattern_type", spec.get("mode", "literal"))).lower()
+    count = int(spec.get("count", 0))
+    if count < 0:
+        raise OperationError("replace_value count must be >= 0")
+    if mode in {"regex", "iregex"}:
+        flags = re.I if mode == "iregex" else 0
+        updated, matched = re.subn(str(search), str(replacement), current, count=count, flags=flags)
+    elif mode in {"literal", "text"}:
+        matched = current.count(str(search))
+        effective = matched if count == 0 else min(matched, count)
+        updated = current.replace(str(search), str(replacement), count if count else -1)
+        matched = effective
+    else:
+        raise OperationError("replace_value pattern_type must be literal, regex, or iregex")
+    if matched == 0:
+        policy = str(spec.get("on_no_match", spec.get("missing_text", "error"))).lower()
+        if policy in {"skip", "ignore"}:
+            return current
+        raise OperationError(f"replace_value search text not found: {search!r}")
+    expected = spec.get("expect_replacements")
+    if expected is not None and matched != int(expected):
+        raise OperationError(f"replace_value expected {expected} replacements, got {matched}")
+    # Preserve ruamel scalar subclasses such as quoted strings when possible.
+    if type(current) is not str:
+        try:
+            return type(current)(updated)
+        except Exception:
+            pass
+    return updated
+
+@registry.register("replace_value", "replace_text_value")
+def op_replace_value(ctx: OperationContext, spec: dict[str, Any]) -> Any:
+    path = spec.get("path", "$")
+    policy = _missing_policy(spec, allow_create=False)
+    try:
+        current = get_node(ctx.document, path)
+    except Exception:
+        if policy == "skip":
+            return ctx.document
+        raise OperationError(f"Path not found: {path!r}")
+    updated = _replace_string_value(current, spec)
+    if updated is current or updated == current:
+        return ctx.document
+    ctx.document = set_node(ctx.document, path, updated, False)
+    return ctx.document
 
 @registry.register("set", "replace")
 def op_set(ctx: OperationContext, spec: dict[str, Any]) -> Any:
@@ -311,7 +370,19 @@ def op_copy_move_node(ctx: OperationContext, spec: dict[str, Any]) -> Any:
 
 @registry.register("append", "prepend", "insert", "insert_at", "insert_before", "insert_after")
 def op_insert(ctx: OperationContext, spec: dict[str, Any]) -> Any:
-    seq = get_node(ctx.document, spec["path"])
+    path = spec["path"]
+    policy = _missing_policy(spec)
+    try:
+        seq = get_node(ctx.document, path)
+    except Exception:
+        if policy == "skip": return ctx.document
+        if policy == "create":
+            ctx.document = set_node(ctx.document, path, [], True)
+            seq = get_node(ctx.document, path)
+        else:
+            raise OperationError(f"Path not found: {path!r}")
+    if not isinstance(seq, list):
+        raise OperationError(f"Insert operation path must select a list: {path!r}")
     values = deepcopy(spec.get("values", [spec.get("value")]))
     op = spec["op"]
     position = spec.get("position")
@@ -339,7 +410,19 @@ def op_insert(ctx: OperationContext, spec: dict[str, Any]) -> Any:
 
 @registry.register("update_item", "upsert_item")
 def op_update_item(ctx: OperationContext, spec: dict[str, Any]) -> Any:
-    seq = get_node(ctx.document, spec["path"])
+    path = spec["path"]
+    policy = _missing_policy(spec, allow_create=spec["op"] == "upsert_item")
+    try:
+        seq = get_node(ctx.document, path)
+    except Exception:
+        if policy == "skip": return ctx.document
+        if policy == "create" and spec["op"] == "upsert_item":
+            ctx.document = set_node(ctx.document, path, [], True)
+            seq = get_node(ctx.document, path)
+        else:
+            raise OperationError(f"Path not found: {path!r}")
+    if not isinstance(seq, list):
+        raise OperationError(f"{spec['op']} path must select a list: {path!r}")
     match_spec = _normalize_name_pattern_match(spec)
     indices = find_indices(seq, match_spec)
     if spec["op"] == "upsert_item" and not indices:
@@ -360,11 +443,13 @@ def op_update_item(ctx: OperationContext, spec: dict[str, Any]) -> Any:
             set_node(item, target_path, deepcopy(value), True)
         for path in spec.get("remove", []):
             remove_node(item, path)
+        if isinstance(spec.get('merge'), dict):
+            _merge(item, deepcopy(spec['merge']), spec.get('merge_strategy', 'overwrite'))
         # Run nested operations against the matched item itself. This lets the
         # compiler update deep mappings/lists without replacing the whole
         # subtree, preserving comments, anchors, quoting, and unaffected style.
         if spec.get("item_operations"):
-            nested = OperationContext(document=item, original=deepcopy(item), variables=ctx.variables, captures=ctx.captures)
+            nested = OperationContext(document=item, original=deepcopy(item), variables=ctx.variables, captures=ctx.captures, skipped_operations=ctx.skipped_operations)
             for nested_spec in spec["item_operations"]:
                 if not isinstance(nested_spec, dict) or "op" not in nested_spec:
                     raise OperationError("update_item.item_operations entries require op")
@@ -455,6 +540,8 @@ def op_copy_item(ctx: OperationContext, spec: dict[str, Any]) -> Any:
         src_idx = source["index"]
     else:
         indices = find_indices(seq, source.get("match", {}))
+        if not indices and _missing_policy(spec, allow_create=False) == "skip":
+            return ctx.document
         _require_matches(indices, source, "source")
         if len(indices) != 1: raise MatchError("copy_item requires exactly one source")
         src_idx = indices[0]
@@ -467,10 +554,12 @@ def op_copy_item(ctx: OperationContext, spec: dict[str, Any]) -> Any:
         target_path = path if ("." in path or "[" in path or str(path).startswith(("$", "/"))) else "$/{0}".format(str(path).replace("~", "~0").replace("/", "~1"))
         set_node(item, target_path, deepcopy(value), True)
     for path in spec.get("remove", []): remove_node(item, path)
+    if isinstance(spec.get('merge'), dict):
+        _merge(item, deepcopy(spec['merge']), spec.get('merge_strategy', 'overwrite'))
     # Apply operations to the copied item before insertion. This supports
     # dynamic-key rename/copy/move without repeating the full source item.
     if spec.get("item_operations"):
-        nested = OperationContext(document=item, original=deepcopy(item), variables=ctx.variables, captures=ctx.captures)
+        nested = OperationContext(document=item, original=deepcopy(item), variables=ctx.variables, captures=ctx.captures, skipped_operations=ctx.skipped_operations)
         for nested_spec in spec["item_operations"]:
             if not isinstance(nested_spec, dict) or "op" not in nested_spec:
                 raise OperationError("copy_item.item_operations entries require op")
@@ -655,7 +744,7 @@ def op_copy_item_to_node(ctx: OperationContext, spec: dict[str, Any]) -> Any:
         set_node(value, item_target_path, deepcopy(item_value), True)
     for path in spec.get('remove', []): remove_node(value, path)
     if spec.get('item_operations'):
-        nested = OperationContext(document=value, original=deepcopy(value), variables=ctx.variables, captures=ctx.captures)
+        nested = OperationContext(document=value, original=deepcopy(value), variables=ctx.variables, captures=ctx.captures, skipped_operations=ctx.skipped_operations)
         for nested_spec in spec['item_operations']:
             registry.execute(nested_spec['op'], nested, nested_spec)
         value = nested.document
@@ -670,15 +759,36 @@ def op_copy_item_to_node(ctx: OperationContext, spec: dict[str, Any]) -> Any:
 # Override earlier mapping operations with the unified placement implementation.
 @registry.register('insert_key')
 def op_insert_key_v2(ctx: OperationContext, spec: dict[str, Any]) -> Any:
-    parent = get_node(ctx.document, spec.get('path', '$'))
+    path = spec.get('path', '$')
+    policy = _missing_policy(spec)
+    try:
+        parent = get_node(ctx.document, path)
+    except Exception:
+        if policy == 'skip':
+            return ctx.document
+        if policy == 'create':
+            ctx.document = set_node(ctx.document, path, {}, True)
+            parent = get_node(ctx.document, path)
+        else:
+            raise OperationError(f'Path not found: {path!r}')
+    if not isinstance(parent, dict):
+        raise OperationError('insert_key path must select a mapping')
     _mapping_insert(parent, spec['key'], deepcopy(spec.get('value')), spec.get('position'))
     return ctx.document
 
 @registry.register('copy_key', 'move_key')
 def op_copy_move_key_v2(ctx: OperationContext, spec: dict[str, Any]) -> Any:
-    parent = get_node(ctx.document, spec.get('path', '$'))
+    path = spec.get('path', '$')
+    policy = _missing_policy(spec, allow_create=False)
+    try:
+        parent = get_node(ctx.document, path)
+    except Exception:
+        if policy == 'skip': return ctx.document
+        raise OperationError(f'Path not found: {path!r}')
     source_key = spec['source_key']; target_key = spec.get('target_key', source_key)
-    if source_key not in parent: raise OperationError(f'Missing key: {source_key}')
+    if source_key not in parent:
+        if policy == 'skip': return ctx.document
+        raise OperationError(f'Missing key: {source_key}')
     value = deepcopy(parent[source_key])
     if spec['op'] == 'move_key': del parent[source_key]
     if target_key in parent and spec.get('on_conflict', 'error') == 'error' and target_key != source_key:
@@ -692,7 +802,12 @@ def op_copy_move_node_v2(ctx: OperationContext, spec: dict[str, Any]) -> Any:
     target_path = spec.get('to_path') or spec.get('path')
     if not isinstance(source_path, str) or not isinstance(target_path, str):
         raise OperationError('copy_node/move_node require from_path and to_path')
-    value = deepcopy(get_node(ctx.document, source_path))
+    policy = _missing_policy(spec)
+    try:
+        value = deepcopy(get_node(ctx.document, source_path))
+    except Exception:
+        if policy == 'skip': return ctx.document
+        raise OperationError(f'Path not found: {source_path!r}')
     root_key = _direct_root_mapping_key(target_path)
     if root_key is not None:
         _mapping_insert(ctx.document, root_key, value, spec.get('position'))

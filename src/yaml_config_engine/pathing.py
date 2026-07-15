@@ -1,20 +1,22 @@
 from __future__ import annotations
 import re
 from typing import Any
+
+UnionToken = tuple[str, ...]
 from .errors import PathError
 
 _TOKEN_RE = re.compile(r"(?:^|\.)([^.\[\]]+)|\[(\-?\d+|\*)\]")
 
 
-def parse_path(path: str) -> list[str | int]:
+def parse_path(path: str) -> list[str | int | UnionToken]:
     if path in ("$", "", None):
         return []
     if path.startswith("$/"):
         parts = path[2:].split("/")
-        return [int(p) if p.lstrip("-").isdigit() else p.replace("~1", "/").replace("~0", "~") for p in parts]
+        return [_parse_pointer_part(p) for p in parts]
     if path.startswith("/"):
         parts = path[1:].split("/")
-        return [int(p) if p.lstrip("-").isdigit() else p.replace("~1", "/").replace("~0", "~") for p in parts]
+        return [_parse_pointer_part(p) for p in parts]
     s = path[2:] if path.startswith("$.") else path
     tokens: list[str | int] = []
     for m in _TOKEN_RE.finditer(s):
@@ -30,10 +32,24 @@ def parse_path(path: str) -> list[str | int]:
     return tokens
 
 
+def _parse_pointer_part(part: str) -> str | int | UnionToken:
+    decoded = part.replace("~1", "/").replace("~0", "~")
+    if decoded == '[*]':
+        return '*'
+    if decoded.startswith("[") and decoded.endswith("]") and "," in decoded:
+        values = tuple(x.strip() for x in decoded[1:-1].split(",") if x.strip())
+        if len(values) >= 2:
+            return values
+    return int(decoded) if decoded.lstrip("-").isdigit() else decoded
+
+def path_has_selectors(path: str) -> bool:
+    return any(token == '*' or isinstance(token, tuple) for token in parse_path(path))
+
+
 def _pointer(tokens: list[str | int]) -> str:
     if not tokens:
         return '$'
-    encoded = [str(x).replace('~', '~0').replace('/', '~1') for x in tokens]
+    encoded = [('[' + ','.join(x) + ']') if isinstance(x, tuple) else str(x).replace('~', '~0').replace('/', '~1') for x in tokens]
     return '$/' + '/'.join(encoded)
 
 
@@ -44,13 +60,19 @@ def expand_paths(root: Any, path: str) -> list[str]:
     Numeric YAML indices are zero-based, including negative indices.
     """
     tokens = parse_path(path)
-    if '*' not in tokens:
+    if not any(token == '*' or isinstance(token, tuple) for token in tokens):
         return [path]
     states: list[tuple[Any, list[str | int]]] = [(root, [])]
     for pos, token in enumerate(tokens):
         next_states: list[tuple[Any, list[str | int]]] = []
         remaining = tokens[pos + 1:]
         for node, concrete in states:
+            if isinstance(token, tuple):
+                if isinstance(node, dict):
+                    for key in token:
+                        if key in node:
+                            next_states.append((node[key], [*concrete, key]))
+                continue
             if token == '*':
                 if isinstance(node, dict):
                     for key, value in node.items():
@@ -68,7 +90,7 @@ def expand_paths(root: Any, path: str) -> list[str]:
                 # Once all wildcard segments have already been resolved, keep
                 # an exact missing suffix so missing:create can create it for
                 # every concrete wildcard parent.
-                if '*' not in remaining:
+                if not any(x == '*' or isinstance(x, tuple) for x in remaining):
                     suffix = [token, *remaining]
                     next_states.append((None, [*concrete, *suffix]))
                 continue
@@ -84,7 +106,7 @@ def expand_paths(root: Any, path: str) -> list[str]:
 def get_node(root: Any, path: str) -> Any:
     cur = root
     for token in parse_path(path):
-        if token == '*':
+        if token == '*' or isinstance(token, tuple):
             raise PathError(f"Wildcard path must be expanded before direct access: {path!r}")
         try:
             cur = cur[token]
@@ -99,7 +121,7 @@ def get_parent(root: Any, path: str) -> tuple[Any, str | int]:
         raise PathError("Document root has no parent")
     cur = root
     for token in tokens[:-1]:
-        if token == '*':
+        if token == '*' or isinstance(token, tuple):
             raise PathError(f"Wildcard path must be expanded before direct access: {path!r}")
         try:
             cur = cur[token]
@@ -140,7 +162,7 @@ def set_node(root: Any, path: str, value: Any, create_missing: bool = False) -> 
         return value
     cur = root
     for token in tokens[:-1]:
-        if token == '*':
+        if token == '*' or isinstance(token, tuple):
             raise PathError(f"Wildcard path must be expanded before direct access: {path!r}")
         if isinstance(token, int):
             cur = cur[token]

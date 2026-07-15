@@ -13,7 +13,7 @@ missing: error
 可選三種模式：
 
 ```yaml
-missing: error   # 預設；找不到就失敗，避免路徑拼錯卻沒有發現
+missing: skip    # 預設；找不到就略過，CLI 會列出 skipped_operations
 missing: skip    # 找不到就略過，適合不同版本不一定都有的 optional section
 missing: create  # 找不到就建立，適合明確知道要新增的 key/element
 ```
@@ -560,7 +560,7 @@ XML 使用相同 rule 結構，只需把 operation path 改成 XML path。
 
 | 需求 | 建議 operation |
 |---|---|
-| 更新已知 path，找不到要失敗 | `set`，預設 `missing:error` |
+| 更新已知 path，找不到要略過 | `set`，預設 `missing:skip` |
 | 可選 section，有才更新 | `set/replace/merge + missing:skip` |
 | 明確新增完整 section | `set/merge + missing:create` |
 | 指定 mapping child key | `key` |
@@ -747,7 +747,7 @@ operations:
 ## Missing policy 搭配 selector
 
 ```yaml
-missing: error   # 預設；零命中就失敗
+missing: skip    # 預設；零命中就略過並回報
 missing: skip    # 零命中略過
 missing: create  # 精確 suffix 缺少時建立
 ```
@@ -758,3 +758,20 @@ missing: create  # 精確 suffix 缺少時建立
 - `$.services.*.metadata` 已匹配到 service，但 `metadata` 不存在時，可以為每個 service 建立。
 - Pattern selector 如 `key_pattern: api-*` 或 `name_pattern: api-*` 不允許 `missing:create`，因為實際名稱不明確。
 - 多筆匹配需要明確使用 `on_multiple_matches: all`；部分 pattern operation 預設即為 all，但手動寫出較清楚。
+
+
+## update_item 不寫 match：更新全部既有 item
+
+```yaml
+operations:
+  - op: update_item
+    path: $.applications.*.services
+    expect_matches: -1
+    set:
+      enabled: true
+      runtime:
+        timeout: 45
+        retry: {count: 3}
+```
+
+`*` 先展開成每個 `services` list；每個 list 內的全部 item 都會更新。若只想更新部分 item，請改用 `match`、`name` 或 `name_pattern`。

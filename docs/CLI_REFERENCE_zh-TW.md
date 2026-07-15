@@ -141,3 +141,54 @@ python xml_config_tool.py capabilities
 2  驗證、lint、冪等性或參數檢查未通過
 其他  執行環境或未預期錯誤
 ```
+
+## 執行時 mapping 檔
+
+```bash
+python config_tool.py apply-folder source generated output --variable-map-file mappings/system-a.yaml
+python yaml_config_tool.py apply source.yaml config.yaml -o output.yaml --variable-map-file mappings/system-a.yaml
+python xml_config_tool.py apply source.xml config.yaml -o output.xml --variable-map-file mappings/system-a.yaml
+```
+
+`--variable-map-file` 可重複指定。後面的 mapping 覆蓋前面的 mapping，也會覆蓋 patch 內相同 scope/變數；CLI `--var` 最後覆蓋全部。
+
+## Auto config 可讀模式與 retry 防護
+
+`compile` 與 `compile-folder` 預設產生較容易人工修改的簡寫 config，並且不加入 retry/duplicate 防護。所有簡化候選都必須 replay 後與 after 在值、型別、mapping/list 順序上完全一致，否則自動回退。
+
+```bash
+python yaml_config_tool.py compile before.yaml after.yaml -o patch.yaml
+```
+
+需要重複執行防護時才加入：
+
+```bash
+python yaml_config_tool.py compile before.yaml after.yaml -o patch.yaml --retry-protection
+```
+
+Folder 模式：
+
+```bash
+python yaml_config_tool.py compile-folder before after generated --retry-protection
+```
+
+未指定 `--retry-protection` 時，不會自動輸出 `duplicate`。指定後，compiler 會對可能重複新增的 list item 產生 identity 防護；第一次 replay 仍必須 100% 還原，第二次套用則不得新增重複資料。
+
+## Compile 後依 mapping 自動泛化
+
+```bash
+python yaml_config_tool.py compile before.yaml after.yaml -o patch.yaml \
+  --variable-map-file mapping.yaml \
+  --fab FAB14-FZ1 \
+  --env STAGING
+```
+
+- 可重複指定 `--variable-map-file`，後面的 mapping 覆蓋前面的同名變數。
+- 完整 scalar 相等時優先替換為 `{{ variable }}`。
+- 字串可唯一組合時替換為模板，例如 `fab14-stg.com.tw` → `{{ fab_full }}{{ env }}.com.tw`。
+- 每次泛化後均 strict replay；無法 100% 還原時自動回退。
+
+
+# Compile quote 行為
+
+`compile` 不需要 quote 參數；預設直接讀取 after 的 scalar style。搭配 `--variable-map-file` 時，變數化後仍驗證 quote style。

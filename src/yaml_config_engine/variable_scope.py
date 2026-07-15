@@ -29,6 +29,9 @@ def resolve_scope_variables(raw: Any, fab: str, env: str) -> tuple[dict[str, Any
     table = _normalize_table(raw)
     matched: list[tuple[tuple[int, int, int], str, dict[str, Any]]] = []
     for scope, values in table.items():
+        if scope.lower() == 'global':
+            matched.append(((-1, 0, 0), scope, values))
+            continue
         fab_prefix, sep, env_prefix = scope.partition(':')
         if fab_prefix and not fab.startswith(fab_prefix):
             continue

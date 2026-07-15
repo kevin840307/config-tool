@@ -299,6 +299,37 @@ XML：
     - parameters.obsolete
 ```
 
+更新目前 list／重複 XML element 中的**全部既有項目**時，可省略 `match`，但必須明確設定 `expect_matches: -1`：
+
+```yaml
+- op: update_item
+  path: $.services
+  expect_matches: -1
+  set:
+    enabled: true
+    runtime.timeout: 45
+```
+
+XML：
+
+```yaml
+- op: update_item
+  path: /configuration/services
+  element: service
+  expect_matches: -1
+  set:
+    '@enabled': 'true'
+    runtime.timeout: '45'
+```
+
+規則：
+
+- 有 `match/name/name_pattern`：只更新符合條件的項目。
+- 沒有 selector 且 `expect_matches: -1`：更新目前容器中的全部項目。
+- 沒有 selector 且不是 `-1`：直接報錯，避免意外更新全部。
+- `path` 應指向 list／重複節點的容器；可使用 `$.applications.*.services` 讓多個容器各自更新全部 item。
+- 欄位名稱是 `expect_matches`，不是 `expect_matchs`。
+
 ### upsert_item
 
 有命中時更新，沒有命中時新增：
@@ -521,7 +552,7 @@ create_bytes_base64: ...
 
 ## Missing policy、key/name selector 與大型 section
 
-需要既有目標的 operation 預設使用 `missing: error`。可明確改成：
+所有主要 operation 預設使用 `missing: skip`。找不到完整 selector chain 時不失敗，CLI 會在 `skipped_operations` 顯示資訊。需要嚴格驗證時可明確改成：
 
 ```yaml
 missing: error
@@ -587,3 +618,315 @@ variable_map:
 ```
 
 外部檔路徑以 `patch.yaml` 所在目錄為基準。CLI `--var` 仍具有最高優先權。
+
+## 字串內容替換：`replace_value`
+
+`replace` 是替換整個 YAML/XML 節點；只想替換字串中的一部分時，使用 `replace_value`。
+
+YAML：
+
+```yaml
+operations:
+  - op: replace_value
+    path: $.server.url
+    search: /aaa
+    replacement: /bbb
+    expect_replacements: 1
+```
+
+來源值 `abdc/aaa` 會變成 `abdc/bbb`，其他內容不變。
+
+同時更新多個 YAML value：
+
+```yaml
+operations:
+  - op: replace_value
+    path: $.opt.*.url
+    search: /v506/
+    replacement: /v512/
+    on_no_match: skip
+    on_multiple_matches: all
+```
+
+Regex：
+
+```yaml
+operations:
+  - op: replace_value
+    path: $.services[*].image
+    search: ':[0-9]+\.[0-9]+$'
+    replacement: ':2.0'
+    pattern_type: regex
+    on_no_match: skip
+```
+
+XML attribute 或 element text 使用相同格式：
+
+```yaml
+operations:
+  - op: replace_value
+    path: /configuration/server/@url
+    search: /aaa
+    replacement: /bbb
+
+  - op: replace_value
+    path: /configuration/server/path
+    search: /aaa
+    replacement: /bbb
+```
+
+可用欄位：
+
+- `search`：要尋找的文字；別名 `old`
+- `replacement`：替換文字；別名 `new`
+- `pattern_type`：`literal`（預設）、`regex`、`iregex`
+- `count`：最多替換次數，`0` 表示全部
+- `expect_replacements`：實際替換次數必須相同
+- `on_no_match`：`error`（預設）或 `skip`
+- `missing`：路徑不存在時 `error` 或 `skip`
+
+## 自動 compiler 的 selector 簡化
+
+自動 compiler 會先逐筆產生精確 operation，再嘗試把完全相同的變更合併成 wildcard path。
+
+例如：
+
+```yaml
+$.opt.appA.enabled
+$.opt.appB.enabled
+$.opt.appC.enabled
+```
+
+會安全收斂成：
+
+```yaml
+- op: replace
+  path: $.opt.*.enabled
+  value: true
+  on_multiple_matches: all
+```
+
+多層共同變更也可收斂：
+
+```yaml
+- op: replace
+  path: $.applications.*.routes[*].metadata
+  value:
+    managed: true
+  on_multiple_matches: all
+```
+
+安全規則：
+
+1. operation、value、missing 與其他參數必須完全相同。
+2. wildcard 實際命中的節點集合必須等於原本逐筆 path。
+3. 合併後會重新 apply，結果必須與 after 完全相同。
+4. 任何條件不成立就保留精確 path，不會強行簡化。
+
+字串 scalar 的 before/after 只改一部分時，compiler 會在安全且直觀的情況下產生 `replace_value`。
+
+但以下完整數字或數字版本值會直接產生完整 `replace`（YAML）或 `set`（XML），不會使用局部字串替換：
+
+```yaml
+# before: "2026.04"
+# after:  "2026.05"
+- op: replace
+  path: $/version
+  value: "2026.05"
+
+# before: 30
+# after:  45
+- op: replace
+  path: $/timeout
+  value: 45
+```
+
+只有像 `abdc/aaa` 變成 `abdc/bbb` 這類一般字串片段，才會自動產生 `replace_value`。
+
+## 自動 compiler：共同差異抽取
+
+自動 compiler 不只會合併整筆完全相同的 operation，也會把同一個 dict/list 內的「共同部分」抽成 wildcard operation，個別不同部分則保留精確設定。
+
+例如三個 mapping 都新增相同 `retry`、共同修改 `timeout`，但 `endpoint` 不同：
+
+```yaml
+opt:
+  appA: {timeout: 30}
+  appB: {timeout: 30}
+  appC: {timeout: 30}
+```
+
+會自動收斂成：
+
+```yaml
+operations:
+  - op: set
+    path: $/opt/*/retry
+    missing: create
+    on_multiple_matches: all
+    value:
+      count: 3
+      delays: [1, 5, 15]
+
+  - op: replace
+    path: $/opt/*/timeout
+    value: 45
+    on_multiple_matches: all
+
+  - op: insert_key
+    path: $/opt/appA
+    key: endpoint
+    value: api-a
+
+  - op: insert_key
+    path: $/opt/appB
+    key: endpoint
+    value: api-b
+```
+
+List item 也會抽取共同欄位：
+
+```yaml
+operations:
+  - op: set
+    path: $/services/*/retry
+    missing: create
+    on_multiple_matches: all
+    value:
+      count: 3
+
+  - op: replace
+    path: $/services/*/timeout
+    value: 45
+    on_multiple_matches: all
+
+  - op: update_item
+    path: $/services
+    match: {name: api}
+    item_operations:
+      - op: replace
+        path: $/image
+        value: api:v2
+```
+
+安全原則：
+
+1. 先產生逐項精確 operations。
+2. 僅抽取內容、operation 與語意完全一致的共同部分。
+3. 不同部分仍保留精確 path 或 `update_item`。
+4. 簡化後會重新套用完整 config；結果與 after 不完全一致就退回原始逐項 operations。
+5. 超大型 diff 會限制高成本候選分析，避免 config 簡化拖慢上千行 YAML 的編譯。
+
+## `missing` 對中間路徑的統一行為
+
+`missing` 不只判斷最後一個 key。當中間 parent path、來源節點、陣列 selector 或 match 不存在時，主要 YAML/XML operation 都採相同語意：
+
+```yaml
+missing: skip    # 預設：略過並回報資訊
+missing: skip    # 整筆 operation 不執行，文件保持不變
+missing: create  # 僅在可明確推導容器類型或節點名稱時建立
+```
+
+例如 `insert_key` 的中間 parent 不存在時可安全略過：
+
+```yaml
+- op: insert_key
+  path: $.application.optional.runtime
+  key: retry
+  value:
+    count: 3
+    delays: [1, 5, 15]
+  missing: skip
+```
+
+需要建立完整 mapping parent 時：
+
+```yaml
+- op: insert_key
+  path: $.application.runtime
+  key: retry
+  value:
+    count: 3
+  missing: create
+```
+
+List 容器也能明確建立：
+
+```yaml
+- op: append
+  path: $.application.routes
+  value:
+    name: health
+    path: /health
+  missing: create
+```
+
+`missing: skip` 適用於 `set/replace/remove/merge/rename_key/insert_key/copy_key/move_key/copy_node/move_node/append/prepend/insert/update_item/upsert_item/remove_item/move_item/copy_item/capture/replace_value` 等主要操作。`missing: create` 只適用於能安全判斷新增內容的操作；例如 remove、rename、copy source 不存在時無法猜測來源，因此不可建立。
+
+
+## Compiler 多階段收斂
+
+自動 compiler 不是只做一次簡化，而是執行最多 6 輪的 verified fixed-point pipeline：共同 section 抽取、list item 共同欄位抽取、`*`/`[*]` 合併、同 parent 欄位合併成 `merge`。每一輪都會完整 replay；只要結果與 after 不等價，就保留上一輪安全結果。大型差異會停用高成本候選搜尋，但仍保留線性 wildcard 與 merge 收斂。
+
+## 精確 Key Union Selector
+
+Auto compiler 在多個 sibling mapping/list 具有完全相同行為時，可產生精確 union selector：
+
+```yaml
+path: $/test-data/[p1,p2,p3]
+```
+
+它只會展開為：
+
+```text
+$/test-data/p1
+$/test-data/p2
+$/test-data/p3
+```
+
+與 `*` 不同，不會選到同層其他 key。這讓 compiler 能安全合併 `copy_item`、`remove_item`、`update_item`、`move_item`、`insert_key` 與一般 scalar operations。
+
+Auto optimizer 採多輪 checkpoint/replay：每一輪候選必須完整重播並嚴格等於 after（包含 dict/list 順序與 scalar 型別）才接受；候選失敗或 optimizer 發生例外，只回退該輪，不會破壞前一個已驗證結果。
+
+## Auto compiler 可讀簡寫
+
+Auto compiler 可能輸出以下簡寫；載入時會轉成 canonical operation：
+
+- `from`：`copy_item.source.match` 的簡寫
+- `before` / `after`：list item 相對位置簡寫
+- `place`：mapping key 或 index 位置簡寫
+- `set`：直接修改 matched/copied item 欄位
+- `merge`：遞迴合併 matched/copied item 的巢狀 mapping
+
+`merge` 只在 replay 可證明與 after 完全一致時使用；若新增 key 的順序不能正確還原，compiler 會保留原本的 `item_operations`。
+
+## Auto compiler 當下結構收斂規則（v0.9.4）
+
+Auto compiler 不推測未來可能新增的節點，只依目前 before/after 判斷：
+
+- 同一 mapping 目前所有 child 都有相同行為：使用 `*`。
+- 同一 list 目前所有 item 都有相同行為：使用 `[*]`。
+- 只有部分 sibling 有相同行為：使用 `[p1,p2,p3]` 等明確 union。
+- 候選必須 replay 後 100% 等於 after，包含值、型別、mapping 順序與 list 順序。
+- replay 通過但 config 沒有變短、重複沒有減少或可讀性變差時，不接受該候選。
+- 某一輪失敗只回退該輪，不影響前面已驗證的收斂結果。
+
+
+# Quote style
+
+Operation 可選：
+
+```yaml
+quote: auto | preserve | plain | single | double
+```
+
+`auto`/未設定為預設。`quote_styles` 用於巢狀 payload，path 第一段為 `value`、`set`、`merge`、`replacement`：
+
+```yaml
+quote_styles:
+  set.version: single
+  merge.metadata.tag: double
+  value.items.0.name: plain
+```
+
+Auto compiler 只在必要時輸出 quote metadata；一般情況不增加設定。`plain` 若會改變 YAML 型別，strict replay 會拒絕候選並回退。

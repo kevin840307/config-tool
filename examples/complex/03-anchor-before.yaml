@@ -1,9 +1,0 @@
-defaults: &defaults
-  timeout: 30 # preserved timeout
-  retries: 3
-service_a:
-  <<: *defaults
-  url: "https://a.example"
-service_b:
-  <<: *defaults
-  url: "https://b.example"

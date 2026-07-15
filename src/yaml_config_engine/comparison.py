@@ -12,6 +12,18 @@ def _type_name(value: Any) -> str:
     return type(value).__name__
 
 
+def _string_style(value: Any) -> str:
+    """Return the YAML scalar presentation style relevant to round-trip output."""
+    name = type(value).__name__
+    if name == 'SingleQuotedScalarString':
+        return 'single'
+    if name == 'DoubleQuotedScalarString':
+        return 'double'
+    if name in {'LiteralScalarString', 'FoldedScalarString'}:
+        return name
+    return 'plain'
+
+
 def strict_compare(actual: Any, expected: Any, path: str = '$', *, max_differences: int = 100) -> ComparisonResult:
     """Compare YAML data including scalar type, mapping key order, list order and values."""
     differences: list[dict[str, Any]] = []
@@ -48,7 +60,10 @@ def strict_compare(actual: Any, expected: Any, path: str = '$', *, max_differenc
                 walk(av, ev, f'{p}/{i}')
             return
         if isinstance(a, str) and isinstance(e, str):
-            pass
+            actual_style, expected_style = _string_style(a), _string_style(e)
+            if actual_style != expected_style:
+                add('quote_style', p, actual_style, expected_style)
+                return
         elif type(a) is not type(e):
             add('type', p, _type_name(a), _type_name(e)); return
         if a != e:

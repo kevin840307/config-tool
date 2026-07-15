@@ -23,6 +23,25 @@ class XmlFolderCompileResult:
 
 class XmlFolderCompiler:
     @staticmethod
+    def _readable_text_spec(data: bytes) -> dict[str, Any] | None:
+        bom = data.startswith(b'\xef\xbb\xbf')
+        raw = data[3:] if bom else data
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            return None
+        return {'create_text': text, 'text_options': {'encoding': 'utf-8', 'bom': bom}}
+
+    @staticmethod
+    def _write_text_spec(target: Path, spec: dict[str, Any]) -> None:
+        options = dict(spec.get('text_options') or {})
+        data = str(spec['create_text']).encode(options.get('encoding', 'utf-8'))
+        if options.get('bom'):
+            data = b'\xef\xbb\xbf' + data
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
+    @staticmethod
     def _scope_for(relative_path: str) -> tuple[str, str]:
         parts = Path(relative_path).parts
         return (parts[0], parts[1]) if len(parts) >= 3 else ('', '')
@@ -37,8 +56,9 @@ class XmlFolderCompiler:
             if action == 'delete':
                 files[rel] = {'delete': True}
             elif action == 'create':
-                files[rel] = {
-                    'create_bytes_base64': base64.b64encode((out / entry['payload']).read_bytes()).decode('ascii')
+                data = (out / entry['payload']).read_bytes()
+                files[rel] = self._readable_text_spec(data) or {
+                    'create_bytes_base64': base64.b64encode(data).decode('ascii')
                 }
             elif action == 'patch':
                 cfg = load_one(out / entry['config'])
@@ -57,7 +77,7 @@ class XmlFolderCompiler:
         dump_one(patch, path)
         return path
 
-    def compile_folder(self, before_root, after_root, output_root, include_unchanged=False, verify=True, layout='compact'):
+    def compile_folder(self, before_root, after_root, output_root, include_unchanged=False, verify=True, layout='compact', matched_files_only=False):
         if layout not in {'compact', 'expanded'}:
             raise ValueError("layout must be 'compact' or 'expanded'")
         b = Path(before_root).resolve(); a = Path(after_root).resolve(); out = Path(output_root).resolve()
@@ -67,6 +87,8 @@ class XmlFolderCompiler:
         entries = []; all_ok = True
         for rel in rels:
             bp = b / rel; ap = a / rel
+            if matched_files_only and (not bp.exists() or not ap.exists()):
+                continue
             if not bp.exists():
                 dst = out / 'created' / rel; dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(ap, dst)
                 entries.append({'relative_path': rel.as_posix(), 'action': 'create', 'payload': str(Path('created') / rel)})
@@ -104,8 +126,8 @@ class XmlFolderCompiler:
             mp = compact
         return XmlFolderCompileResult(mp, entries, all_ok, compact)
 
-    def _apply_compact(self, src: Path, patch_path: Path, out: Path, variables: dict[str, Any] | None):
-        patch = load_config_with_variable_maps(patch_path)
+    def _apply_compact(self, src: Path, patch_path: Path, out: Path, variables: dict[str, Any] | None, variable_map_files: list[str | Path] | None = None):
+        patch = load_config_with_variable_maps(patch_path, variable_map_files)
         if patch.get('kind') != 'xml-folder-patch-compact':
             raise ValueError(f'Not an XML compact folder patch: {patch_path}')
         if out.exists(): shutil.rmtree(out)
@@ -123,8 +145,7 @@ class XmlFolderCompiler:
             elif 'create_text' in spec:
                 # Backward compatibility with compact patches generated before
                 # exact-byte payloads were introduced.
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(str(spec['create_text']), encoding='utf-8')
+                self._write_text_spec(target, spec)
                 action = 'create'
             else:
                 fab, env = self._scope_for(rel)
@@ -137,18 +158,18 @@ class XmlFolderCompiler:
         counts = {k: sum(1 for e in report if e['action'] == k) for k in ('patch', 'create', 'delete')}
         return {'version': 1, 'kind': 'xml-folder-apply', 'output_root': str(out), 'files': report, 'counts': counts}
 
-    def apply_folder(self, source_root, generated_root, output_root, variables=None):
+    def apply_folder(self, source_root, generated_root, output_root, variables=None, variable_map_files=None):
         src = Path(source_root).resolve(); gen = Path(generated_root).resolve(); out = Path(output_root).resolve()
         if gen.is_file():
-            return self._apply_compact(src, gen, out, variables)
+            return self._apply_compact(src, gen, out, variables, variable_map_files)
         if not (gen / 'manifest.yaml').exists() and (gen / 'patch.yaml').exists():
-            return self._apply_compact(src, gen / 'patch.yaml', out, variables)
+            return self._apply_compact(src, gen / 'patch.yaml', out, variables, variable_map_files)
         manifest = load_one(gen / 'manifest.yaml')
         if out.exists(): shutil.rmtree(out)
         shutil.copytree(src, out); report = []
         for e in manifest['entries']:
             target = out / e['relative_path']; action = e['action']
-            if action == 'patch': XmlPatchEngine().apply_file(target, gen / e['config'], target, variables or {})
+            if action == 'patch': XmlPatchEngine().apply_file(target, gen / e['config'], target, variables or {}, variable_map_files=variable_map_files)
             elif action == 'create': target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(gen / e['payload'], target)
             elif action == 'delete' and target.exists(): target.unlink()
             report.append({'relative_path': e['relative_path'], 'action': action})

@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<configuration>
+  <!-- application -->
+  <server port="9090"><retry count="3"/></server>
+</configuration>

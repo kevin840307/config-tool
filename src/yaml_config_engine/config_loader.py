@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .yamlio import load_one
+from .variable_scope import resolve_scope_variables
 
 
 def _as_paths(value: Any) -> list[str]:
@@ -54,7 +55,7 @@ def _merge_maps(base: dict[str, dict[str, Any]], overlay: dict[str, dict[str, An
     return result
 
 
-def load_config_with_variable_maps(path: str | Path) -> dict[str, Any]:
+def load_config_with_variable_maps(path: str | Path, override_variable_map_files: list[str | Path] | None = None) -> dict[str, Any]:
     """Load a config and resolve variable_map_file relative to that config.
 
     Precedence, from lowest to highest:
@@ -72,6 +73,29 @@ def load_config_with_variable_maps(path: str | Path) -> dict[str, Any]:
         ref_path = (config_path.parent / ref).resolve()
         external = _merge_maps(external, _normalize_map_document(load_one(ref_path), ref_path))
     result['variable_map'] = _merge_maps(external, _normalize_inline(result.get('variable_map')))
+
+    # Runtime-supplied mapping files have higher priority than mappings declared
+    # inside the config. Relative paths are resolved from the caller's CWD.
+    for ref in override_variable_map_files or []:
+        ref_path = Path(ref).expanduser().resolve()
+        result['variable_map'] = _merge_maps(
+            result['variable_map'], _normalize_map_document(load_one(ref_path), ref_path)
+        )
+
+    # Global values are always available. A standalone generated patch may
+    # additionally declare the exact FAB/ENV scope used during compilation so
+    # it can resolve the same external mapping without relying on folder paths.
+    scope = result.get('scope') or result.get('variable_scope') or {}
+    if scope is None:
+        scope = {}
+    if not isinstance(scope, dict):
+        raise ValueError('scope must be a mapping with optional fab/env')
+    fab = str(scope.get('fab', '') or '')
+    env = str(scope.get('env', '') or '')
+    scoped_values, matched_scopes = resolve_scope_variables(result['variable_map'], fab, env)
+    result['variables'] = {**dict(result.get('variables') or {}), **deepcopy(scoped_values)}
+    if matched_scopes:
+        result['resolved_variable_scopes'] = matched_scopes
 
     rules = result.get('rules') or []
     if not isinstance(rules, list):

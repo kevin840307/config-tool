@@ -14,12 +14,10 @@ def _render_string(value: str, context: dict[str, Any]) -> Any:
         rendered = _env.compile_expression(expr, undefined_to_none=False)(**context)
     else:
         rendered = _env.from_string(value).render(**context)
-    # Rendered config strings intentionally become normal Python strings for
-    # backward-compatible output (quoted template syntax does not force the
-    # generated YAML value to remain quoted). Values coming from a round-trip
-    # variable-map may themselves be ScalarString subclasses, so normalize
-    # only string results while retaining int/bool/list/dict expression types.
+    # Template quoting is YAML syntax only. Quote output style is controlled by
+    # the operation quote/quote_styles metadata or by target-node preservation.
     return str(rendered) if isinstance(rendered, str) else rendered
+
 
 
 def render_value(value: Any, context: dict[str, Any]) -> Any:
@@ -53,7 +51,21 @@ def render_value(value: Any, context: dict[str, Any]) -> Any:
             rendered_key = render_value(key, context)
             rendered_value = render_value(value[key], context)
             if rendered_key == key:
-                result[key] = rendered_value
+                # Replacing a quoted template scalar in-place makes ruamel keep
+                # the template literal's quote style. Remove/reinsert instead so
+                # quote style is driven by quote metadata or the destination node.
+                original_value = value[key]
+                if isinstance(original_value, str) and "{{" in str(original_value) and isinstance(rendered_value, str):
+                    comment = None
+                    ca = getattr(result, 'ca', None)
+                    if ca is not None:
+                        comment = getattr(ca, 'items', {}).pop(key, None)
+                    result.pop(key, None)
+                    result.insert(min(index, len(result)), key, rendered_value)
+                    if comment is not None and ca is not None:
+                        ca.items[key] = comment
+                else:
+                    result[key] = rendered_value
                 continue
             # Preserve order and mapping-level comment metadata on templated keys.
             comment = None

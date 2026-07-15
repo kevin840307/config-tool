@@ -33,6 +33,7 @@ class XmlApplyResult:
     changed: bool
     text: str
     applied_operations: list[str] = field(default_factory=list)
+    skipped_operations: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _render(value: Any, context: dict[str, Any]) -> Any:
@@ -58,7 +59,7 @@ def _missing_policy(spec: dict[str, Any], *, allow_create: bool = True) -> str:
         if zero_policy in {'ignore', 'skip'}:
             policy = 'skip'
         else:
-            policy = 'create' if legacy else 'error'
+            policy = 'create' if legacy else 'skip'
     else:
         policy = str(explicit).lower()
         if policy not in {'error','skip','create'}:
@@ -94,13 +95,43 @@ def _expand_named_targets(targets: list[XmlTarget], spec: dict[str, Any]) -> tup
 
 def _expect(targets: list[XmlTarget], spec: dict[str, Any], label: str) -> None:
     expected = spec.get('expect_matches')
-    if expected is not None and len(targets) != int(expected):
+    all_matches = expected == -1
+    if expected is not None and not all_matches and len(targets) != int(expected):
         raise XmlFormatError(f"{label}: expected {expected} matches, got {len(targets)}")
-    if not targets and spec.get('on_zero_matches', 'error') == 'error':
+    if not targets and str(spec.get('on_zero_matches', spec.get('missing', 'skip'))).lower() == 'error':
         raise XmlFormatError(f"{label}: no XML node matched {spec.get('path')!r}")
-    if len(targets) > 1 and spec.get('on_multiple_matches', 'error') == 'error':
+    if not all_matches and len(targets) > 1 and spec.get('on_multiple_matches', 'error') == 'error':
         raise XmlFormatError(f"{label}: multiple XML nodes matched ({len(targets)})")
 
+
+
+def _replace_text_value(current: str, spec: dict[str, Any]) -> str:
+    search = spec.get('search', spec.get('old'))
+    if search is None:
+        raise XmlFormatError('replace_value requires search (or old)')
+    replacement = spec.get('replacement', spec.get('new', ''))
+    mode = str(spec.get('pattern_type', spec.get('mode', 'literal'))).lower()
+    count = int(spec.get('count', 0))
+    if count < 0:
+        raise XmlFormatError('replace_value count must be >= 0')
+    if mode in {'regex', 'iregex'}:
+        flags = re.I if mode == 'iregex' else 0
+        updated, matched = re.subn(str(search), str(replacement), current, count=count, flags=flags)
+    elif mode in {'literal', 'text'}:
+        total = current.count(str(search))
+        matched = total if count == 0 else min(total, count)
+        updated = current.replace(str(search), str(replacement), count if count else -1)
+    else:
+        raise XmlFormatError('replace_value pattern_type must be literal, regex, or iregex')
+    if matched == 0:
+        policy = str(spec.get('on_no_match', spec.get('missing_text', 'skip'))).lower()
+        if policy in {'skip', 'ignore'}:
+            return current
+        raise XmlFormatError(f'replace_value search text not found: {search!r}')
+    expected = spec.get('expect_replacements')
+    if expected is not None and matched != int(expected):
+        raise XmlFormatError(f'replace_value expected {expected} replacements, got {matched}')
+    return updated
 
 def _target_value(text: str, target: XmlTarget) -> str:
     if target.kind == 'attribute' and target.attr:
@@ -171,8 +202,8 @@ class XmlPatchEngine:
     declaration, namespace prefixes, blank lines and line endings remain intact.
     """
 
-    def load_config(self, path: str | Path) -> EngineConfig:
-        return EngineConfig.model_validate(load_config_with_variable_maps(path))
+    def load_config(self, path: str | Path, variable_map_files: list[str | Path] | None = None) -> EngineConfig:
+        return EngineConfig.model_validate(load_config_with_variable_maps(path, variable_map_files))
 
     def apply_text(self, text: str, config: EngineConfig | dict[str, Any], variables: dict[str, Any] | None = None) -> tuple[str, list[str]]:
         cfg = config if isinstance(config, EngineConfig) else EngineConfig.model_validate(config)
@@ -180,18 +211,47 @@ class XmlPatchEngine:
         applied: list[str] = []
         context_vars = {**cfg.variables, **(variables or {})}
         captures: dict[str, Any] = {}
+        skipped: list[dict[str, Any]] = []
         for raw in cfg.operations:
+            operation_before = current
+            skipped_before = len(skipped)
             context = {**context_vars, **captures, 'captures': captures}
             spec = _render(deepcopy(raw), context)
             op = spec['op']
             if op == 'capture':
                 root, _ = parse_xml_spans(current)
                 targets = select(current, root, spec.get('path', '/'))
+                if not targets and str(spec.get('missing', 'skip')).lower() == 'skip':
+                    skipped.append({'id': spec.get('id'), 'op': op, 'path': spec.get('path'), 'reason': 'no XML node matched'})
+                    applied.append(spec.get('id', op)); continue
                 _expect(targets, spec, 'capture')
                 captures[spec.get('as', spec.get('id', 'capture'))] = _target_value(current, targets[0])
                 applied.append(spec.get('id', op)); continue
-            current = self._apply_operation(current, spec)
+            try:
+                current = self._apply_operation(current, spec)
+            except XmlFormatError as exc:
+                # Apply missing:skip consistently to the complete XML selector
+                # chain (missing intermediate parent/source/match included).
+                policy = str(spec.get('missing', 'skip')).lower()
+                legacy_skip = str(spec.get('on_zero_matches', '')).lower() in {'skip', 'ignore'}
+                message = str(exc).lower()
+                missing_markers = (
+                    'no xml node matched', 'expected exactly one', 'got 0',
+                    'no child', 'not found', 'expected one child',
+                    'expected 1 source', 'expected exactly one source',
+                )
+                if (policy == 'skip' or legacy_skip) and any(m in message for m in missing_markers):
+                    skipped.append({'id': spec.get('id'), 'op': op, 'path': spec.get('path'), 'reason': str(exc)})
+                    applied.append(spec.get('id', op))
+                    continue
+                raise
             applied.append(spec.get('id', op))
+            if len(skipped) == skipped_before and current == operation_before:
+                skipped.append({
+                    'id': spec.get('id'), 'op': op, 'path': spec.get('path'),
+                    'reason': 'no effect (target missing, selector matched nothing, or value already satisfied)',
+                })
+        self.last_skipped_operations = skipped
         return current, applied
 
     def _apply_operation(self, text: str, spec: dict[str, Any]) -> str:
@@ -243,6 +303,31 @@ class XmlPatchEngine:
                     if policy == 'error':
                         raise XmlFormatError(f'copy_item_to_node: duplicate item by {unique_by}')
             return apply_patches(text, [self._raw_at_position(text, destination, snippet, spec.get('position'))])
+
+
+        if op in {'replace_value', 'replace_text_value'}:
+            policy = _missing_policy(spec, allow_create=False)
+            if not targets:
+                if policy == 'skip':
+                    return text
+                _expect(targets, spec, op)
+            if 'on_multiple_matches' not in spec:
+                spec['on_multiple_matches'] = 'all'
+            _expect(targets, spec, op)
+            patches: list[Patch] = []
+            for target in targets:
+                current_value = _target_value(text, target)
+                updated = _replace_text_value(current_value, spec)
+                if updated == current_value:
+                    continue
+                if target.kind == 'attribute' and target.attr:
+                    patches.append(Patch(target.attr.value_start, target.attr.value_end, xml_escape_attr(updated, target.attr.quote), op))
+                else:
+                    node = target.node
+                    if node.children:
+                        raise XmlFormatError('replace_value supports scalar XML text/attributes only')
+                    patches.append(Patch(node.content_start, node.content_end, xml_escape_text(updated), op))
+            return apply_patches(text, patches)
 
         if op in {'set', 'replace'}:
             selector_parent_targets = targets
@@ -373,6 +458,8 @@ class XmlPatchEngine:
             return apply_patches(text, patches)
 
         if op in {'update_item', 'upsert_item'}:
+            if op == 'update_item' and not any(k in spec for k in ('match', 'name', 'name_pattern')) and spec.get('expect_matches') != -1:
+                raise XmlFormatError('update_item requires match/name/name_pattern, or expect_matches: -1 to update all items')
             _expect(targets, spec, op + '.container')
             match_spec = dict(spec)
             if 'name' in spec and 'name' not in match_spec.get('match', {}): match_spec['match'] = {**match_spec.get('match', {}), 'name': spec['name']}
@@ -383,9 +470,10 @@ class XmlPatchEngine:
                 value = spec.get('value', spec.get('set', {}))
                 return apply_patches(text, [self._insert_child_patch(text, targets[0].node, element, value, spec.get('position'))])
             expected = spec.get('expect_matches')
-            if expected is not None and len(items) != int(expected):
+            all_matches = expected == -1
+            if expected is not None and not all_matches and len(items) != int(expected):
                 raise XmlFormatError(f'{op}: expected {expected} items, got {len(items)}')
-            if len(items) > 1 and spec.get('on_multiple_matches', 'error') == 'error':
+            if not all_matches and len(items) > 1 and spec.get('on_multiple_matches', 'error') == 'error':
                 raise XmlFormatError(f'{op}: multiple matching XML items ({len(items)})')
             if not items:
                 policy = _missing_policy(spec, allow_create=op == 'upsert_item')
@@ -711,9 +799,9 @@ class XmlPatchEngine:
 
     def apply_file(self, source: str | Path, config: EngineConfig | dict[str, Any] | str | Path,
                    output: str | Path | None = None, variables: dict[str, Any] | None = None,
-                   dry_run: bool | None = None) -> XmlApplyResult:
+                   dry_run: bool | None = None, variable_map_files: list[str | Path] | None = None) -> XmlApplyResult:
         source = Path(source)
-        cfg = self.load_config(config) if isinstance(config, (str, Path)) else (config if isinstance(config, EngineConfig) else EngineConfig.model_validate(config))
+        cfg = self.load_config(config, variable_map_files) if isinstance(config, (str, Path)) else (config if isinstance(config, EngineConfig) else EngineConfig.model_validate(config))
         original_bytes = source.read_bytes()
         bom = original_bytes.startswith(b'\xef\xbb\xbf')
         text = original_bytes.decode('utf-8-sig')
@@ -752,4 +840,4 @@ class XmlPatchEngine:
                     if os.path.exists(tmp): os.unlink(tmp)
             else:
                 output_path.write_bytes(payload)
-        return XmlApplyResult(source, None if effective_dry_run else output_path, changed, updated, applied)
+        return XmlApplyResult(source, None if effective_dry_run else output_path, changed, updated, applied, getattr(self, "last_skipped_operations", []))
