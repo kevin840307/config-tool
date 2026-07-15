@@ -1,0 +1,45 @@
+variable_map:
+  global:
+    namespace: name-a
+    version: 2026.04.0
+
+  :STAGING:
+    ENV: 'STAGING'
+    env: '-stg'
+
+  :PROD:
+    ENV: 'PROD'
+    env: ''
+
+  FAB14-FZ1:
+    fab: f14
+    fab_full: fab14
+    FAB_AB_FULL: FAB14A
+    GIGA_FAB_FULL: FAB14B
+    fab_ab: f14a
+
+  FAB14-FZ2:
+    fab: f14
+    fab_full: fab14
+    FAB_AB_FULL: FAB14B
+    GIGA_FAB_FULL: FAB14A
+    fab_ab: f14b
+
+  FAB15-FZ1:
+    fab: f15
+    fab_full: fab15
+    FAB_FULL: FAB15
+    fab_ab: f15a
+
+  FAB15-FZ2:
+    fab: f15
+    fab_full: fab15
+    FAB_FULL: FAB15
+    fab_ab: f15b
+
+  SOIC:
+    namespace: soic-a
+    fab: ap
+    fab_full: soic1
+    FAB_FULL: SOIC
+    fab_ab: soic1
