@@ -1,9 +1,0 @@
-variable_map:
-  FAB14:
-    HOST: server-a
-  FAB14:STAGING:
-    HOST: server-a-staging
-  FAB14-FZ1:
-    HOST: server-b
-  FAB14-FZ1:STAGING:
-    HOST: server-c

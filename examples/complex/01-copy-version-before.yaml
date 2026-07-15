@@ -1,7 +1,0 @@
-db:
-  # keep this release
-  - version: "2025.6"
-    data: "B"
-    dataa: "XX"
-    datac: "XX"
-    datav: "XX"

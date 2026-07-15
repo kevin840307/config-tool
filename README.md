@@ -1,144 +1,144 @@
-# YAML / XML Config Tool
+# YAML/XML Config Tool v0.10.0-rc1
 
-以「修改前檔案 + 修改後檔案」自動產生 patch，或使用手寫 config 批次修改 YAML/XML。工具以保留原始內容為優先：未修改區域的註解、順序、引號、縮排、換行與文字格式不應被無關地改寫。
+以 before/after 自動產生可讀 patch，套用後以 replay 驗證值、型別、mapping/list 順序及 YAML quote style。
 
-## 最常用：before / after 資料夾
-
-### YAML
-
-```bat
-python yaml_config_tool.py compile-folder before-folder after-folder generated
-python yaml_config_tool.py apply-folder before-folder generated\patch.yaml output-folder
-python yaml_config_tool.py verify-folder before-folder generated after-folder
-```
-
-### XML
-
-```bat
-python xml_config_tool.py compile-folder before-folder after-folder generated
-python xml_config_tool.py apply-folder before-folder generated\patch.yaml output-folder
-python xml_config_tool.py verify-folder before-folder generated after-folder
-```
-
-`compile-folder` 會產生主要入口 `patch.yaml`，並保留相容用的 `manifest.yaml` 與獨立 configs。新增、刪除、修改與未變更檔案均會分類記錄。
-
-## 常用：整個資料夾 + 指定 child 規則
-
-```yaml
-version: 1
-
-# 所有 YAML 檔案先套用
-operations:
-  - op: set
-    path: $.common.timeout
-    value: 30
-    create_missing: true
-
-rules:
-  - id: child-a
-    filters:
-      path_allow: ["child-a/**"]
-    operations:
-      - op: replace
-        path: $.server.host
-        value: child-a-server
-
-  - id: child-b-application
-    filters:
-      path_allow: ["child-b/application.yaml"]
-    operations:
-      - op: update_item
-        path: $.services
-        match: {name: api}
-        set: {enabled: true}
-```
-
-```bat
-python yaml_config_tool.py run-folder source rules.yaml output
-```
-
-XML 使用相同 rules 結構，入口改為 `xml_config_tool.py`，路徑改用 XML path。
-
-## FAB / ENV 與外部變數表
-
-```yaml
-variable_map_file: variables/variable-map.yaml
-```
-
-```yaml
-variable_map:
-  FAB14:
-    HOST: server-a
-  FAB14:STAGING:
-    HOST: server-a-staging
-  FAB14-FZ1:STAGING:
-    HOST: server-c
-```
-
-也能在執行時覆蓋：
-
-```bat
-python yaml_config_tool.py run-folder source config.yaml output --var HOST=temporary-host
-```
-
-## YAML 輸出格式與換行
-
-預設等同：
-
-```python
-yaml.indent(mapping=2, sequence=4, offset=2)
-```
-
-可由 config 調整：
-
-```yaml
-options:
-  yaml_output:
-    mapping: 2
-    sequence: 4
-    offset: 2
-    width: 4096
-    preserve_quotes: true
-    line_ending: preserve  # preserve / lf / crlf
-```
-
-XML 可用 `options.xml_output.line_ending`。未設定時保留來源換行。
-
-## 安裝與平台
-
-需求：Python 3.10 以上。
-
-```bat
-python -m pip install -r requirements.txt
-```
-
-Windows 可使用 `RUN_WINDOWS.cmd` / `RUN_XML_WINDOWS.cmd`；Linux 可使用 `RUN_LINUX.sh` / `RUN_XML_LINUX.sh`，也可直接以 `python` 或 `python3` 執行入口。
-
-## 交付前自我驗證
-
-```bat
-python -m pip install -r requirements-dev.txt
-RUN_TESTS_WINDOWS.cmd
-```
-
-Linux：
+## 快速開始
 
 ```bash
-python3 -m pip install -r requirements-dev.txt
-./RUN_TESTS_LINUX.sh
+python yaml_config_tool.py compile before.yaml after.yaml -o patch.yaml
+python yaml_config_tool.py apply before.yaml patch.yaml -o result.yaml
+python yaml_config_tool.py verify before.yaml patch.yaml after.yaml
 ```
 
-## 文件導覽
+搭配既有 mapping 泛化：
 
-- [5 分鐘快速開始](docs/QUICK_START_zh-TW.md)
-- [完整設定與 operation 參考](docs/CONFIG_REFERENCE_zh-TW.md)
-- [CLI 指令參考](docs/CLI_REFERENCE_zh-TW.md)
-- [XML 使用指南](docs/XML_USER_GUIDE_zh-TW.md)
-- [多版本升級完整案例](docs/MULTI_VERSION_UPGRADE_zh-TW.md)
-- [測試矩陣與驗收範圍](docs/TEST_MATRIX_zh-TW.md)
-- [常見問題與排錯](docs/TROUBLESHOOTING_zh-TW.md)
+```bash
+python yaml_config_tool.py compile before.yaml after.yaml -o patch.yaml \
+  --variable-map-file system-a-fab-values.yaml \
+  --fab FAB14-FZ1 --env STAGING
+```
+
+Folder 與 mixed YAML/XML：
+
+```bash
+python config_tool.py compile-folder before after generated
+python config_tool.py apply-folder before generated output
+python config_tool.py verify-folder before generated after
+```
+
+## Quote 預設行為
+
+不需要額外設定：
+
+- Auto compiler 跟隨 after 的 plain、single、double quote style。
+- 修改既有節點時優先保留目標樣式。
+- 新增節點時依 after 樣式產生最小必要 metadata。
+- Mapping 泛化後會再次 replay，quote 不一致就回退。
+
+人工指定：
+
+```yaml
+operations:
+  - op: set
+    path: $/app/version
+    value: '{{ version }}'
+    quote: single
+```
+
+可用值：`auto`、`preserve`、`plain`、`single`、`double`。
+
+巢狀值：
+
+```yaml
+- op: merge
+  path: $/app
+  value:
+    version: '{{ version }}'
+    endpoint: '{{ endpoint }}'
+  quote_styles:
+    value.version: single
+    value.endpoint: double
+```
+
+## Auto compiler 原則
+
+- replay 必須 100% 還原。
+- 能 `*` 就使用 `*`；完整 list item 行為使用 `[*]`；部分 sibling 才使用 union。
+- 每輪只有在 operation、重複內容或可讀性確實改善時才接受。
+- Retry 防護預設關閉；需要時加 `--retry-protection`。
+- 所有 major operation 預設 `missing: skip`，可明確改為 `error` 或 `create`。
+
+完整說明見 `docs/`。
+
+## v0.10.0-rc1 Folder 穩定化
+
+- 修正 Python API 的 YAML compact/expanded folder mapping 傳遞。
+- 修正 XML compact/expanded folder mapping 傳遞。
+- XML-only compact 對 UTF-8 新檔預設使用可讀 `create_text`，不再使用 Base64。
+- 完整回歸 compact/expanded、patch/create/delete、matched-files-only。
+- 300 檔 mixed YAML/XML 壓力測試通過，預設產物無 Base64。
+- `a→c`、`a1→c1` optimizer 與 replay 持續通過。
 
 
-## 進階手寫 Config
+## Python API（v0.10.0-rc1）
 
-- [Section、List、Pattern 與 missing 完整範例](docs/SECTION_CONFIG_EXAMPLES_zh-TW.md)
+```python
+from config_tool_api import ConfigTool
+
+result = ConfigTool().compile("a.yaml", "b.yaml", "patch.yaml")
+assert result.verified
+
+ConfigTool().apply("a.yaml", "patch.yaml", "result.yaml")
+assert ConfigTool().verify("a.yaml", "patch.yaml", "b.yaml").verified
+```
+
+同一 facade 支援 YAML、XML、mapping 泛化與 mixed folder。完整說明見 `docs/PYTHON_API_zh-TW.md`。
+
+## v0.10.0-rc1 穩定化與自我檢查
+
+v0.9.x 進入補齊與修 bug 階段。正式 Python API 現在會：
+
+- 接受單一 mapping 路徑或多個 mapping 路徑。
+- 自動建立 compile/apply 的輸出父資料夾。
+- 在 before/after 或 before/expected 格式不一致時立即報錯。
+- 保持 YAML、XML、mixed folder 的統一結果介面。
+
+執行內建回歸測試：
+
+```bash
+python self_test.py
+```
+
+Windows：
+
+```bat
+python self_test.py
+```
+
+成功時最後顯示 `SELF-TEST PASS`。
+
+## v0.10.0-rc1 Release Hardening
+
+此版本不新增 action。主要補齊舊 patch 相容、folder verify runtime mapping、缺變數錯誤與 atomic recovery。
+
+```python
+result = tool.verify_folder(
+    "source",
+    "generated",
+    "expected",
+    format="yaml",
+    variable_map_files="mapping.yaml",
+)
+assert result.verified
+```
+
+## Release Candidate 驗收
+
+```bash
+python release_check.py
+python benchmark.py
+```
+
+`release_check.py` 會執行 Python 語法編譯、完整 self-test，以及 YAML/XML/mixed CLI smoke；`benchmark.py` 會建立大型 YAML 並執行 compile/apply/verify，輸出可比較的 JSON 基準。
+
+公開 Python API 與 CLI 命令在 v0.10.0-rc1 起凍結；RC 階段只接受相容性 bug fix。

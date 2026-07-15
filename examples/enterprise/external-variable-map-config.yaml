@@ -1,8 +1,0 @@
-version: 1
-variable_map_file: variables/variable-map.yaml
-rules:
-  - id: update-host
-    operations:
-      - op: set
-        path: server.host
-        value: "{{ HOST }}"

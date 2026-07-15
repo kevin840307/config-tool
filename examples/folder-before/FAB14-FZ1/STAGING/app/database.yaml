@@ -1,7 +1,0 @@
-# FAB14 STAGING database versions
-db:
-  - version: "2025.6.123456789"
-    data: "B"
-    dataa: "XX"
-    datac: "XX"
-    datav: "XX"
