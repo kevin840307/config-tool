@@ -1,0 +1,18 @@
+# application release matrix
+versions:
+  # oldest version should be removed
+  - version: "2025.10"
+    status: deprecated
+    parameters:
+      timeout: 10
+      legacyMode: true
+
+  # latest existing version is the clone source
+  - version: "2026.01"
+    status: active
+    parameters:
+      timeout: 20
+      retry: 2
+    sections:
+      logging:
+        level: INFO

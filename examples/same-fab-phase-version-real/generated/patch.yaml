@@ -1,0 +1,480 @@
+version: 1
+kind: mixed-folder-patch-compact
+formats:
+  - yaml
+  - xml
+matched_files_only: false
+files:
+  config/appA/application.yaml:
+    format: yaml
+    config:
+      version: 1
+      defaults_profile: concise-v1
+      options:
+        atomic_write: true
+      operations:
+        - op: replace
+          path: $/spring/datasource/hikari/maximum-pool-size
+          value: 30
+        - op: replace
+          path: $/spring/kafka/consumer/max-poll-records
+          value: 1000
+        - op: insert_key
+          path: $/platform
+          key: releasePolicy
+          value:
+            oldVersion: '{{ old_version }}'
+            currentVersion: '{{ current_version }}'
+            newVersion: '{{ new_version }}'
+            removeOld: true
+            copyCurrent: true
+          place:
+            after_key: paths
+        - op: replace_value
+          search: '{{ current_version }}'
+          replacement: '{{ new_version }}'
+          paths:
+            - $/platform/version
+            - $/platform/paths/*
+        - op: replace_value
+          path: $/logging/level/root
+          search: INFO
+          replacement: WARN
+    strategy: semantic
+  config/appA/log.xml:
+    format: xml
+    config:
+      version: 1
+      defaults_profile: concise-v1
+      format: xml
+      options:
+        atomic_write: true
+      operations:
+        - op: replace_value
+          path: /configuration/*/@level
+          search: INFO
+          replacement: WARN
+    strategy: structural-operations-exact
+  config/appB/{{ old_version }}/application.yaml:
+    format: yaml
+    config:
+      version: 1
+      defaults_profile: concise-v1
+      options:
+        atomic_write: true
+      operations:
+        - op: replace
+          path: $/spring/datasource/hikari/maximum-pool-size
+          value: 30
+        - op: replace
+          path: $/spring/kafka/consumer/max-poll-records
+          value: 1000
+        - op: insert_key
+          path: $/platform
+          key: releasePolicy
+          value:
+            oldVersion: '{{ old_version }}'
+            currentVersion: '{{ current_version }}'
+            newVersion: '{{ new_version }}'
+            removeOld: true
+            copyCurrent: true
+          place:
+            after_key: paths
+        - op: replace_value
+          search: '{{ old_version }}'
+          replacement: '{{ new_version }}'
+          paths:
+            - $/platform/version
+            - $/platform/paths/*
+        - op: replace_value
+          path: $/logging/level/root
+          search: INFO
+          replacement: WARN
+    strategy: semantic
+  config/appB/{{ old_version }}/log.xml:
+    format: xml
+    config:
+      version: 1
+      defaults_profile: concise-v1
+      format: xml
+      options:
+        atomic_write: true
+      operations:
+        - op: replace_value
+          path: /configuration/*/@level
+          search: INFO
+          replacement: WARN
+    strategy: structural-operations-exact
+  config/appB/{{ current_version }}/application.yaml:
+    format: yaml
+    config:
+      version: 1
+      defaults_profile: concise-v1
+      options:
+        atomic_write: true
+      operations:
+        - op: replace
+          path: $/spring/datasource/hikari/maximum-pool-size
+          value: 30
+        - op: replace
+          path: $/spring/kafka/consumer/max-poll-records
+          value: 1000
+        - op: insert_key
+          path: $/platform
+          key: releasePolicy
+          value:
+            oldVersion: '{{ old_version }}'
+            currentVersion: '{{ current_version }}'
+            newVersion: '{{ new_version }}'
+            removeOld: true
+            copyCurrent: true
+          place:
+            after_key: paths
+        - op: replace_value
+          search: '{{ current_version }}'
+          replacement: '{{ new_version }}'
+          paths:
+            - $/platform/version
+            - $/platform/paths/*
+        - op: replace_value
+          path: $/logging/level/root
+          search: INFO
+          replacement: WARN
+    strategy: semantic
+  config/appB/{{ current_version }}/log.xml:
+    format: xml
+    config:
+      version: 1
+      defaults_profile: concise-v1
+      format: xml
+      options:
+        atomic_write: true
+      operations:
+        - op: replace_value
+          path: /configuration/*/@level
+          search: INFO
+          replacement: WARN
+    strategy: structural-operations-exact
+  config/appB/{{ new_version }}/application.yaml:
+    format: yaml
+    config:
+      version: 1
+      defaults_profile: concise-v1
+      options:
+        atomic_write: true
+      operations:
+        - op: replace
+          path: $/spring/datasource/hikari/maximum-pool-size
+          value: 30
+        - op: replace
+          path: $/spring/kafka/consumer/max-poll-records
+          value: 1000
+        - op: insert_key
+          path: $/platform
+          key: releasePolicy
+          value:
+            oldVersion: '{{ old_version }}'
+            currentVersion: '{{ current_version }}'
+            newVersion: '{{ new_version }}'
+            removeOld: true
+            copyCurrent: true
+          place:
+            after_key: paths
+        - op: replace_value
+          path: $/logging/level/root
+          search: INFO
+          replacement: WARN
+    strategy: semantic
+  config/appB/{{ new_version }}/log.xml:
+    format: xml
+    config:
+      version: 1
+      defaults_profile: concise-v1
+      format: xml
+      options:
+        atomic_write: true
+      operations:
+        - op: replace_value
+          path: /configuration/*/@level
+          search: INFO
+          replacement: WARN
+    strategy: structural-operations-exact
+  values.yaml:
+    format: yaml
+    config:
+      version: 1
+      defaults_profile: concise-v1
+      options:
+        atomic_write: true
+      operations:
+        - op: copy_item
+          path: $/apps/appA/phases/p1/versions
+          set:
+            name: '{{ new_version }}'
+          item_operations:
+            - op: replace
+              path: $/image/tag
+              value: 2026.03.1
+            - op: replace_value
+              path: $/resources/requests/cpu
+              search: '25'
+              replacement: '50'
+            - op: replace
+              path: $/autoscaling/maxReplicas
+              value: 20
+            - op: update_item
+              path: $/containers
+              match:
+                name: main
+              item_operations:
+                - op: update_item
+                  path: $/env
+                  match:
+                    name: CONFIG_VERSION
+                  item_operations:
+                    - op: replace_value
+                      path: $/value
+                      search: '{{ current_version }}'
+                      replacement: '{{ new_version }}'
+                  expect_matches: 1
+              expect_matches: 1
+            - op: update_item
+              path: $/volumes
+              match:
+                name: spring-config
+              item_operations:
+                - op: replace_value
+                  path: $/configMap/name
+                  search: '{{ current_version }}'
+                  replacement: '{{ new_version }}'
+              expect_matches: 1
+            - op: replace_value
+              path: $/config/bundle
+              search: '{{ current_version }}'
+              replacement: '{{ new_version }}'
+            - op: replace
+              path: $/config/featureFlags/newRouting
+              value: true
+            - op: replace
+              path: $/config/database/readOnly
+              value: false
+            - op: replace_value
+              path: $/config/kafka/consumer/groupId
+              search: '{{ current_version }}'
+              replacement: '{{ new_version }}'
+          from:
+            name: '{{ current_version }}'
+          after:
+            name: '{{ current_version }}'
+          merge:
+            config:
+              migration:
+                enabled: true
+                sourceVersion: '{{ old_version }}'
+                targetVersion: '{{ new_version }}'
+                strategy: rolling
+        - op: remove_item
+          path: $/apps/appA/phases/*/versions
+          match:
+            name: '{{ old_version }}'
+        - op: update_item
+          path: $/apps/appA/phases/p1/versions
+          match:
+            name: '{{ current_version }}'
+          item_operations:
+            - op: replace_value
+              path: $/resources/requests/cpu
+              search: '25'
+              replacement: '50'
+            - op: replace
+              path: $/autoscaling/maxReplicas
+              value: 20
+            - op: replace
+              path: $/config/featureFlags/newRouting
+              value: true
+          set:
+            shadow: false
+            replica: 3
+          merge:
+            config:
+              migration:
+                enabled: true
+                sourceVersion: '{{ old_version }}'
+                targetVersion: '{{ new_version }}'
+                strategy: rolling
+        - op: copy_item
+          path: $/apps/appA/phases/p2/versions
+          set:
+            name: '{{ new_version }}'
+          item_operations:
+            - op: replace
+              path: $/image/tag
+              value: 2026.03.1
+            - op: replace_value
+              path: $/resources/requests/cpu
+              search: '25'
+              replacement: '50'
+            - op: replace_value
+              path: $/resources/limits/memory
+              search: '2'
+              replacement: '4'
+            - op: replace
+              path: $/autoscaling/maxReplicas
+              value: 20
+            - op: update_item
+              path: $/containers
+              match:
+                name: main
+              item_operations:
+                - op: update_item
+                  path: $/env
+                  match:
+                    name: CONFIG_VERSION
+                  item_operations:
+                    - op: replace_value
+                      path: $/value
+                      search: '{{ current_version }}'
+                      replacement: '{{ new_version }}'
+                  expect_matches: 1
+              expect_matches: 1
+            - op: update_item
+              path: $/volumes
+              match:
+                name: spring-config
+              item_operations:
+                - op: replace_value
+                  path: $/configMap/name
+                  search: '{{ current_version }}'
+                  replacement: '{{ new_version }}'
+              expect_matches: 1
+            - op: replace_value
+              path: $/config/bundle
+              search: '{{ current_version }}'
+              replacement: '{{ new_version }}'
+            - op: replace
+              path: $/config/featureFlags/newRouting
+              value: true
+            - op: replace
+              path: $/config/database/readOnly
+              value: false
+            - op: replace_value
+              path: $/config/kafka/consumer/groupId
+              search: '{{ current_version }}'
+              replacement: '{{ new_version }}'
+          from:
+            name: '{{ current_version }}'
+          after:
+            name: '{{ current_version }}'
+          merge:
+            config:
+              migration:
+                enabled: true
+                sourceVersion: '{{ old_version }}'
+                targetVersion: '{{ new_version }}'
+                strategy: rolling
+        - op: copy_item
+          path: $/apps/appA/phases/f13p1/versions
+          set:
+            name: '{{ new_version }}'
+          item_operations:
+            - op: replace
+              path: $/image/tag
+              value: 2026.03.1
+            - op: replace_value
+              path: $/resources/requests/cpu
+              search: '25'
+              replacement: '50'
+            - op: replace
+              path: $/resources/extended/gpu/count
+              value: 2
+            - op: replace
+              path: $/autoscaling/maxReplicas
+              value: 20
+            - op: update_item
+              path: $/containers
+              match:
+                name: main
+              item_operations:
+                - op: update_item
+                  path: $/env
+                  match:
+                    name: CONFIG_VERSION
+                  item_operations:
+                    - op: replace_value
+                      path: $/value
+                      search: '{{ current_version }}'
+                      replacement: '{{ new_version }}'
+                  expect_matches: 1
+              expect_matches: 1
+            - op: update_item
+              path: $/volumes
+              match:
+                name: spring-config
+              item_operations:
+                - op: replace_value
+                  path: $/configMap/name
+                  search: '{{ current_version }}'
+                  replacement: '{{ new_version }}'
+              expect_matches: 1
+            - op: replace_value
+              path: $/config/bundle
+              search: '{{ current_version }}'
+              replacement: '{{ new_version }}'
+            - op: replace
+              path: $/config/featureFlags/newRouting
+              value: true
+            - op: replace
+              path: $/config/database/readOnly
+              value: false
+            - op: replace_value
+              path: $/config/kafka/consumer/groupId
+              search: '{{ current_version }}'
+              replacement: '{{ new_version }}'
+          from:
+            name: '{{ current_version }}'
+          after:
+            name: '{{ current_version }}'
+          merge:
+            config:
+              migration:
+                enabled: true
+                sourceVersion: '{{ old_version }}'
+                targetVersion: '{{ new_version }}'
+                strategy: rolling
+        - op: update_item
+          path: $/apps/appA/phases/*/versions
+          match:
+            name: '{{ current_version }}'
+          item_operations:
+            - op: replace_value
+              path: $/resources/requests/cpu
+              search: '25'
+              replacement: '50'
+            - op: replace
+              path: $/autoscaling/maxReplicas
+              value: 20
+            - op: replace
+              path: $/config/featureFlags/newRouting
+              value: true
+          set:
+            shadow: false
+          merge:
+            config:
+              migration:
+                enabled: true
+                sourceVersion: '{{ old_version }}'
+                targetVersion: '{{ new_version }}'
+                strategy: rolling
+    strategy: semantic
+summary:
+  yaml: {}
+  xml:
+    patch: 4
+    create: 0
+    delete: 0
+    unchanged: 0
+  total:
+    patch: 4
+    create: 0
+    delete: 0
+    unchanged: 0

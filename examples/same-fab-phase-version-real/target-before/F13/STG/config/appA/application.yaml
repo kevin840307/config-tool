@@ -1,0 +1,54 @@
+spring:
+  application:
+    name: appA
+  profiles:
+    active: stg,f13
+  config:
+    import:
+      - optional:configtree:/mnt/secrets-store/
+      - optional:file:/workspace/config/
+  datasource:
+    url: jdbc:postgresql://db-fab13-stg/appA
+    username: appA
+    hikari:
+      minimum-idle: 5
+      maximum-pool-size: 20
+      connection-timeout: 30000
+  kafka:
+    bootstrap-servers:
+      - kafka-1:9092
+      - kafka-2:9092
+    consumer:
+      group-id: appA-v603
+      max-poll-records: 500
+platform:
+  fab: fab13
+  fab-short: f13
+  environment: stg
+  namespace: name-f13-stg
+  version: v603
+  phases:
+    - p1
+    - p2
+    - f13p1
+  paths:
+    config: /workspace/config/appA/v603/application.yaml
+    log: /workspace/config/appA/v603/log.xml
+management:
+  endpoints:
+    web:
+      exposure:
+        include:
+          - health
+          - info
+          - prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+logging:
+  level:
+    root: INFO
+    org.springframework: WARN
+  pattern:
+    console: '%d %-5level [%X{phase}] %msg%n'

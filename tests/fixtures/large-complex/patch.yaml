@@ -1,0 +1,35 @@
+version: 1
+variables: {}
+options:
+  atomic_write: true
+operations:
+  - op: update_item
+    match:
+      name: v508
+    item_operations:
+      - op: replace
+        path: $/resource/requests/cpu
+        value: 6
+      - op: replace
+        path: $/routing/backup/enabled
+        value: false
+    paths:
+      - $/*/flat-fabs/*
+      - $/*/regions/*/*
+    on_multiple_matches: all
+  - op: update_item
+    match:
+      name: v512
+    item_operations:
+      - op: replace
+        path: $/resource/requests/cpu
+        value: 6
+      - op: replace
+        path: $/routing/backup/enabled
+        value: false
+    set:
+      replict: 2
+    paths:
+      - $/*/flat-fabs/*
+      - $/*/regions/*/*
+    on_multiple_matches: all

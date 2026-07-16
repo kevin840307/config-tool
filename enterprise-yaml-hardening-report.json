@@ -1,0 +1,34 @@
+{
+  "version": "0.10.0-rc27",
+  "normal_enterprise_yaml_scenarios": 7,
+  "error_boundary_tests": 9,
+  "bugs_fixed": [
+    "YAML merge anchor/alias topology broken by deepcopy during compiler replay",
+    "Missing pure-expression template variable returned Jinja Undefined instead of raising immediately"
+  ],
+  "large_regressions": {
+    "enterprise_helm": {
+      "lines": 13385,
+      "operations": 8,
+      "elapsed_seconds": 8.935,
+      "status": "PASS"
+    },
+    "large_complex_yaml": {
+      "lines": 8976,
+      "operations": 2,
+      "elapsed_seconds": 8.118,
+      "status": "PASS"
+    },
+    "same_fab_phase_version_folder": {
+      "status": "PASS"
+    }
+  },
+  "regressions": [
+    "compileall",
+    "rc26 performance cache safety",
+    "rc25 safe simplification",
+    "self-test",
+    "YAML/XML/mixed folder via self-test"
+  ],
+  "status": "PASS"
+}

@@ -1,0 +1,3549 @@
+global:
+  fabShort: f13
+  fabCode: fab13
+  environment: stg
+  namespace: name-f13-stg
+  imagePullSecrets:
+    - regcred
+  versions:
+    old: v601
+    current: v603
+    new: v604
+platform:
+  cluster:
+    name: k8s-fab13-stg
+    domain: cluster.local
+    dnsService: kube-dns
+  networkPolicy:
+    enabled: true
+    defaultDeny: true
+    egress:
+      - toNamespaces:
+          - monitoring
+          - shared-services
+        ports:
+          - 443
+          - 9092
+      - toCidrs:
+          - 10.0.0.0/8
+        ports:
+          - 5432
+  externalSecrets:
+    enabled: true
+    refreshInterval: 1h
+    secretStoreRef:
+      name: vault-cluster-store
+      kind: ClusterSecretStore
+apps:
+  appA:
+    spring: true
+    configMode: unversioned
+    configRoot: config/appA
+    activeVersion:
+    service:
+      type: ClusterIP
+      ports:
+        - name: http
+          port: 80
+          targetPort: http
+        - name: management
+          port: 9080
+          targetPort: management
+    ingress:
+      enabled: true
+      className: nginx
+      hosts:
+        - host: appA.stg.fab13.internal
+          paths:
+            - path: /
+              pathType: Prefix
+              servicePort: http
+            - path: /actuator
+              pathType: Prefix
+              servicePort: management
+    phases:
+      p1:
+        phaseType: standard
+        routing:
+          primary: true
+          fallbackPhases:
+            - p5
+            - p6
+        versions:
+          - name: v603
+            shadow: false
+            replica: 3
+            image:
+              repository: registry.internal/fab13/appA
+              tag: 2025.12.1
+              pullPolicy: IfNotPresent
+              digestPolicy:
+                enabled: true
+                allowedAlgorithms:
+                  - sha256
+                  - sha512
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+                ephemeral-storage: 1Gi
+              limits:
+                cpu: '2'
+                memory: 2Gi
+                ephemeral-storage: 4Gi
+              extended:
+                gpu:
+                  enabled: false
+                  vendor: nvidia.com/gpu
+                  count: 0
+            autoscaling:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 20
+              metrics:
+                - type: Resource
+                  resource:
+                    name: cpu
+                    target:
+                      type: Utilization
+                      averageUtilization: 70
+                - type: Pods
+                  pods:
+                    metric:
+                      name: requests_per_second
+                    target:
+                      type: AverageValue
+                      averageValue: '100'
+              behavior:
+                scaleUp:
+                  stabilizationWindowSeconds: 0
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 100
+                      periodSeconds: 60
+                    - type: Pods
+                      value: 4
+                      periodSeconds: 60
+                scaleDown:
+                  stabilizationWindowSeconds: 300
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 25
+                      periodSeconds: 60
+            deployment:
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 25%
+              progressDeadlineSeconds: 600
+              revisionHistoryLimit: 10
+              podAnnotations:
+                prometheus.io/scrape: 'true'
+                prometheus.io/port: '9080'
+              podLabels:
+                app.kubernetes.io/name: appA
+                platform/fab: fab13
+                platform/phase: p1
+            containers:
+              - name: main
+                ports:
+                  - name: http
+                    containerPort: 8080
+                  - name: management
+                    containerPort: 9080
+                env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: stg,f13,p1
+                  - name: FAB_CODE
+                    value: fab13
+                  - name: PHASE
+                    value: p1
+                  - name: CONFIG_VERSION
+                    value: v603
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: appA-p1-db
+                        key: password
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+                probes:
+                  liveness:
+                    httpGet:
+                      path: /actuator/health/liveness
+                      port: management
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  readiness:
+                    httpGet:
+                      path: /actuator/health/readiness
+                      port: management
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    failureThreshold: 6
+                  startup:
+                    httpGet:
+                      path: /actuator/health
+                      port: management
+                    periodSeconds: 5
+                    failureThreshold: 60
+                volumeMounts:
+                  - name: spring-config
+                    mountPath: /workspace/config
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                  - name: secret-store
+                    mountPath: /mnt/secrets-store
+                    readOnly: true
+              - name: metrics-sidecar
+                image:
+                  repository: registry.internal/sidecars/metrics
+                  tag: 1.8.2
+                ports:
+                  - name: metrics
+                    containerPort: 9090
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                env:
+                  - name: TARGET_PORT
+                    value: '9080'
+                  - name: PHASE
+                    value: p1
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: app.kubernetes.io/name
+                          operator: In
+                          values:
+                            - appA
+                        - key: platform/phase
+                          operator: In
+                          values:
+                            - p1
+                    topologyKey: kubernetes.io/hostname
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: platform/fab
+                            operator: In
+                            values:
+                              - fab13
+                      topologyKey: topology.kubernetes.io/zone
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: platform/fab
+                          operator: In
+                          values:
+                            - fab13
+                        - key: kubernetes.io/os
+                          operator: In
+                          values:
+                            - linux
+                        - key: node-role
+                          operator: NotIn
+                          values:
+                            - infra
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    preference:
+                      matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: In
+                          values:
+                            - zone-a
+                            - zone-b
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appA
+                    platform/phase: p1
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appA
+            volumes:
+              - name: spring-config
+                configMap:
+                  name: appA-v603-config
+                  items:
+                    - key: application.yaml
+                      path: application.yaml
+                    - key: log.xml
+                      path: log.xml
+              - name: tmp
+                emptyDir:
+                  sizeLimit: 1Gi
+              - name: secret-store
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: appA-fab13-stg
+            config:
+              bundle: appA-v603-config
+              spring:
+                profiles:
+                  - stg
+                  - f13
+                  - p1
+                configImport:
+                  - optional:configtree:/mnt/secrets-store/
+                  - optional:file:/workspace/config/
+              featureFlags:
+                newRouting: true
+                asyncWrite: true
+                phaseOverride: false
+              database:
+                pool:
+                  minimumIdle: 5
+                  maximumPoolSize: 20
+                  connectionTimeoutMs: 30000
+                readOnly: true
+              kafka:
+                consumer:
+                  groupId: appA-p1-v603
+                  concurrency: 3
+                  maxPollRecords: 500
+                producer:
+                  acks: all
+                  retries: 10
+              migration:
+                enabled: true
+                sourceVersion: v601
+                targetVersion: v604
+                strategy: rolling
+            observability:
+              serviceMonitor:
+                enabled: true
+                interval: 30s
+                scrapeTimeout: 10s
+                path: /actuator/prometheus
+              logging:
+                level: INFO
+                json: true
+                mdc:
+                  - fab
+                  - phase
+                  - version
+                  - traceId
+              tracing:
+                enabled: true
+                samplingProbability: 0.1
+                endpoint: http://otel-collector:4318
+          - name: v604
+            shadow: true
+            replica: 1
+            image:
+              repository: registry.internal/fab13/appA
+              tag: 2026.03.1
+              pullPolicy: IfNotPresent
+              digestPolicy:
+                enabled: true
+                allowedAlgorithms:
+                  - sha256
+                  - sha512
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+                ephemeral-storage: 1Gi
+              limits:
+                cpu: '2'
+                memory: 2Gi
+                ephemeral-storage: 4Gi
+              extended:
+                gpu:
+                  enabled: false
+                  vendor: nvidia.com/gpu
+                  count: 0
+            autoscaling:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 20
+              metrics:
+                - type: Resource
+                  resource:
+                    name: cpu
+                    target:
+                      type: Utilization
+                      averageUtilization: 70
+                - type: Pods
+                  pods:
+                    metric:
+                      name: requests_per_second
+                    target:
+                      type: AverageValue
+                      averageValue: '100'
+              behavior:
+                scaleUp:
+                  stabilizationWindowSeconds: 0
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 100
+                      periodSeconds: 60
+                    - type: Pods
+                      value: 4
+                      periodSeconds: 60
+                scaleDown:
+                  stabilizationWindowSeconds: 300
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 25
+                      periodSeconds: 60
+            deployment:
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 25%
+              progressDeadlineSeconds: 600
+              revisionHistoryLimit: 10
+              podAnnotations:
+                prometheus.io/scrape: 'true'
+                prometheus.io/port: '9080'
+              podLabels:
+                app.kubernetes.io/name: appA
+                platform/fab: fab13
+                platform/phase: p1
+            containers:
+              - name: main
+                ports:
+                  - name: http
+                    containerPort: 8080
+                  - name: management
+                    containerPort: 9080
+                env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: stg,f13,p1
+                  - name: FAB_CODE
+                    value: fab13
+                  - name: PHASE
+                    value: p1
+                  - name: CONFIG_VERSION
+                    value: v604
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: appA-p1-db
+                        key: password
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+                probes:
+                  liveness:
+                    httpGet:
+                      path: /actuator/health/liveness
+                      port: management
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  readiness:
+                    httpGet:
+                      path: /actuator/health/readiness
+                      port: management
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    failureThreshold: 6
+                  startup:
+                    httpGet:
+                      path: /actuator/health
+                      port: management
+                    periodSeconds: 5
+                    failureThreshold: 60
+                volumeMounts:
+                  - name: spring-config
+                    mountPath: /workspace/config
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                  - name: secret-store
+                    mountPath: /mnt/secrets-store
+                    readOnly: true
+              - name: metrics-sidecar
+                image:
+                  repository: registry.internal/sidecars/metrics
+                  tag: 1.8.2
+                ports:
+                  - name: metrics
+                    containerPort: 9090
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                env:
+                  - name: TARGET_PORT
+                    value: '9080'
+                  - name: PHASE
+                    value: p1
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: app.kubernetes.io/name
+                          operator: In
+                          values:
+                            - appA
+                        - key: platform/phase
+                          operator: In
+                          values:
+                            - p1
+                    topologyKey: kubernetes.io/hostname
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: platform/fab
+                            operator: In
+                            values:
+                              - fab13
+                      topologyKey: topology.kubernetes.io/zone
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: platform/fab
+                          operator: In
+                          values:
+                            - fab13
+                        - key: kubernetes.io/os
+                          operator: In
+                          values:
+                            - linux
+                        - key: node-role
+                          operator: NotIn
+                          values:
+                            - infra
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    preference:
+                      matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: In
+                          values:
+                            - zone-a
+                            - zone-b
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appA
+                    platform/phase: p1
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appA
+            volumes:
+              - name: spring-config
+                configMap:
+                  name: appA-v604-config
+                  items:
+                    - key: application.yaml
+                      path: application.yaml
+                    - key: log.xml
+                      path: log.xml
+              - name: tmp
+                emptyDir:
+                  sizeLimit: 1Gi
+              - name: secret-store
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: appA-fab13-stg
+            config:
+              bundle: appA-v604-config
+              spring:
+                profiles:
+                  - stg
+                  - f13
+                  - p1
+                configImport:
+                  - optional:configtree:/mnt/secrets-store/
+                  - optional:file:/workspace/config/
+              featureFlags:
+                newRouting: true
+                asyncWrite: true
+                phaseOverride: false
+              database:
+                pool:
+                  minimumIdle: 5
+                  maximumPoolSize: 20
+                  connectionTimeoutMs: 30000
+                readOnly: false
+              kafka:
+                consumer:
+                  groupId: appA-p1-v604
+                  concurrency: 3
+                  maxPollRecords: 500
+                producer:
+                  acks: all
+                  retries: 10
+              migration:
+                enabled: true
+                sourceVersion: v601
+                targetVersion: v604
+                strategy: rolling
+            observability:
+              serviceMonitor:
+                enabled: true
+                interval: 30s
+                scrapeTimeout: 10s
+                path: /actuator/prometheus
+              logging:
+                level: INFO
+                json: true
+                mdc:
+                  - fab
+                  - phase
+                  - version
+                  - traceId
+              tracing:
+                enabled: true
+                samplingProbability: 0.1
+                endpoint: http://otel-collector:4318
+      p2:
+        phaseType: standard
+        routing:
+          primary: true
+          fallbackPhases:
+            - p5
+            - p6
+        versions:
+          - name: v603
+            shadow: false
+            replica: 1
+            image:
+              repository: registry.internal/fab13/appA
+              tag: 2025.12.2
+              pullPolicy: IfNotPresent
+              digestPolicy:
+                enabled: true
+                allowedAlgorithms:
+                  - sha256
+                  - sha512
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+                ephemeral-storage: 1Gi
+              limits:
+                cpu: '2'
+                memory: 2Gi
+                ephemeral-storage: 4Gi
+              extended:
+                gpu:
+                  enabled: false
+                  vendor: nvidia.com/gpu
+                  count: 0
+            autoscaling:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 20
+              metrics:
+                - type: Resource
+                  resource:
+                    name: cpu
+                    target:
+                      type: Utilization
+                      averageUtilization: 70
+                - type: Pods
+                  pods:
+                    metric:
+                      name: requests_per_second
+                    target:
+                      type: AverageValue
+                      averageValue: '100'
+              behavior:
+                scaleUp:
+                  stabilizationWindowSeconds: 0
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 100
+                      periodSeconds: 60
+                    - type: Pods
+                      value: 4
+                      periodSeconds: 60
+                scaleDown:
+                  stabilizationWindowSeconds: 300
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 25
+                      periodSeconds: 60
+            deployment:
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 25%
+              progressDeadlineSeconds: 600
+              revisionHistoryLimit: 10
+              podAnnotations:
+                prometheus.io/scrape: 'true'
+                prometheus.io/port: '9080'
+              podLabels:
+                app.kubernetes.io/name: appA
+                platform/fab: fab13
+                platform/phase: p2
+            containers:
+              - name: main
+                ports:
+                  - name: http
+                    containerPort: 8080
+                  - name: management
+                    containerPort: 9080
+                env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: stg,f13,p2
+                  - name: FAB_CODE
+                    value: fab13
+                  - name: PHASE
+                    value: p2
+                  - name: CONFIG_VERSION
+                    value: v603
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: appA-p2-db
+                        key: password
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+                probes:
+                  liveness:
+                    httpGet:
+                      path: /actuator/health/liveness
+                      port: management
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  readiness:
+                    httpGet:
+                      path: /actuator/health/readiness
+                      port: management
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    failureThreshold: 6
+                  startup:
+                    httpGet:
+                      path: /actuator/health
+                      port: management
+                    periodSeconds: 5
+                    failureThreshold: 60
+                volumeMounts:
+                  - name: spring-config
+                    mountPath: /workspace/config
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                  - name: secret-store
+                    mountPath: /mnt/secrets-store
+                    readOnly: true
+              - name: metrics-sidecar
+                image:
+                  repository: registry.internal/sidecars/metrics
+                  tag: 1.8.2
+                ports:
+                  - name: metrics
+                    containerPort: 9090
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                env:
+                  - name: TARGET_PORT
+                    value: '9080'
+                  - name: PHASE
+                    value: p2
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: app.kubernetes.io/name
+                          operator: In
+                          values:
+                            - appA
+                        - key: platform/phase
+                          operator: In
+                          values:
+                            - p2
+                    topologyKey: kubernetes.io/hostname
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: platform/fab
+                            operator: In
+                            values:
+                              - fab13
+                      topologyKey: topology.kubernetes.io/zone
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: platform/fab
+                          operator: In
+                          values:
+                            - fab13
+                        - key: kubernetes.io/os
+                          operator: In
+                          values:
+                            - linux
+                        - key: node-role
+                          operator: NotIn
+                          values:
+                            - infra
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    preference:
+                      matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: In
+                          values:
+                            - zone-a
+                            - zone-b
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appA
+                    platform/phase: p2
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appA
+            volumes:
+              - name: spring-config
+                configMap:
+                  name: appA-v603-config
+                  items:
+                    - key: application.yaml
+                      path: application.yaml
+                    - key: log.xml
+                      path: log.xml
+              - name: tmp
+                emptyDir:
+                  sizeLimit: 1Gi
+              - name: secret-store
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: appA-fab13-stg
+            config:
+              bundle: appA-v603-config
+              spring:
+                profiles:
+                  - stg
+                  - f13
+                  - p2
+                configImport:
+                  - optional:configtree:/mnt/secrets-store/
+                  - optional:file:/workspace/config/
+              featureFlags:
+                newRouting: true
+                asyncWrite: true
+                phaseOverride: false
+              database:
+                pool:
+                  minimumIdle: 5
+                  maximumPoolSize: 20
+                  connectionTimeoutMs: 30000
+                readOnly: true
+              kafka:
+                consumer:
+                  groupId: appA-p2-v603
+                  concurrency: 3
+                  maxPollRecords: 500
+                producer:
+                  acks: all
+                  retries: 10
+              migration:
+                enabled: true
+                sourceVersion: v601
+                targetVersion: v604
+                strategy: rolling
+            observability:
+              serviceMonitor:
+                enabled: true
+                interval: 30s
+                scrapeTimeout: 10s
+                path: /actuator/prometheus
+              logging:
+                level: INFO
+                json: true
+                mdc:
+                  - fab
+                  - phase
+                  - version
+                  - traceId
+              tracing:
+                enabled: true
+                samplingProbability: 0.1
+                endpoint: http://otel-collector:4318
+          - name: v604
+            shadow: true
+            replica: 1
+            image:
+              repository: registry.internal/fab13/appA
+              tag: 2026.03.1
+              pullPolicy: IfNotPresent
+              digestPolicy:
+                enabled: true
+                allowedAlgorithms:
+                  - sha256
+                  - sha512
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+                ephemeral-storage: 1Gi
+              limits:
+                cpu: '2'
+                memory: 4Gi
+                ephemeral-storage: 4Gi
+              extended:
+                gpu:
+                  enabled: false
+                  vendor: nvidia.com/gpu
+                  count: 0
+            autoscaling:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 20
+              metrics:
+                - type: Resource
+                  resource:
+                    name: cpu
+                    target:
+                      type: Utilization
+                      averageUtilization: 70
+                - type: Pods
+                  pods:
+                    metric:
+                      name: requests_per_second
+                    target:
+                      type: AverageValue
+                      averageValue: '100'
+              behavior:
+                scaleUp:
+                  stabilizationWindowSeconds: 0
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 100
+                      periodSeconds: 60
+                    - type: Pods
+                      value: 4
+                      periodSeconds: 60
+                scaleDown:
+                  stabilizationWindowSeconds: 300
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 25
+                      periodSeconds: 60
+            deployment:
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 25%
+              progressDeadlineSeconds: 600
+              revisionHistoryLimit: 10
+              podAnnotations:
+                prometheus.io/scrape: 'true'
+                prometheus.io/port: '9080'
+              podLabels:
+                app.kubernetes.io/name: appA
+                platform/fab: fab13
+                platform/phase: p2
+            containers:
+              - name: main
+                ports:
+                  - name: http
+                    containerPort: 8080
+                  - name: management
+                    containerPort: 9080
+                env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: stg,f13,p2
+                  - name: FAB_CODE
+                    value: fab13
+                  - name: PHASE
+                    value: p2
+                  - name: CONFIG_VERSION
+                    value: v604
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: appA-p2-db
+                        key: password
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+                probes:
+                  liveness:
+                    httpGet:
+                      path: /actuator/health/liveness
+                      port: management
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  readiness:
+                    httpGet:
+                      path: /actuator/health/readiness
+                      port: management
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    failureThreshold: 6
+                  startup:
+                    httpGet:
+                      path: /actuator/health
+                      port: management
+                    periodSeconds: 5
+                    failureThreshold: 60
+                volumeMounts:
+                  - name: spring-config
+                    mountPath: /workspace/config
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                  - name: secret-store
+                    mountPath: /mnt/secrets-store
+                    readOnly: true
+              - name: metrics-sidecar
+                image:
+                  repository: registry.internal/sidecars/metrics
+                  tag: 1.8.2
+                ports:
+                  - name: metrics
+                    containerPort: 9090
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                env:
+                  - name: TARGET_PORT
+                    value: '9080'
+                  - name: PHASE
+                    value: p2
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: app.kubernetes.io/name
+                          operator: In
+                          values:
+                            - appA
+                        - key: platform/phase
+                          operator: In
+                          values:
+                            - p2
+                    topologyKey: kubernetes.io/hostname
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: platform/fab
+                            operator: In
+                            values:
+                              - fab13
+                      topologyKey: topology.kubernetes.io/zone
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: platform/fab
+                          operator: In
+                          values:
+                            - fab13
+                        - key: kubernetes.io/os
+                          operator: In
+                          values:
+                            - linux
+                        - key: node-role
+                          operator: NotIn
+                          values:
+                            - infra
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    preference:
+                      matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: In
+                          values:
+                            - zone-a
+                            - zone-b
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appA
+                    platform/phase: p2
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appA
+            volumes:
+              - name: spring-config
+                configMap:
+                  name: appA-v604-config
+                  items:
+                    - key: application.yaml
+                      path: application.yaml
+                    - key: log.xml
+                      path: log.xml
+              - name: tmp
+                emptyDir:
+                  sizeLimit: 1Gi
+              - name: secret-store
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: appA-fab13-stg
+            config:
+              bundle: appA-v604-config
+              spring:
+                profiles:
+                  - stg
+                  - f13
+                  - p2
+                configImport:
+                  - optional:configtree:/mnt/secrets-store/
+                  - optional:file:/workspace/config/
+              featureFlags:
+                newRouting: true
+                asyncWrite: true
+                phaseOverride: false
+              database:
+                pool:
+                  minimumIdle: 5
+                  maximumPoolSize: 20
+                  connectionTimeoutMs: 30000
+                readOnly: false
+              kafka:
+                consumer:
+                  groupId: appA-p2-v604
+                  concurrency: 3
+                  maxPollRecords: 500
+                producer:
+                  acks: all
+                  retries: 10
+              migration:
+                enabled: true
+                sourceVersion: v601
+                targetVersion: v604
+                strategy: rolling
+            observability:
+              serviceMonitor:
+                enabled: true
+                interval: 30s
+                scrapeTimeout: 10s
+                path: /actuator/prometheus
+              logging:
+                level: INFO
+                json: true
+                mdc:
+                  - fab
+                  - phase
+                  - version
+                  - traceId
+              tracing:
+                enabled: true
+                samplingProbability: 0.1
+                endpoint: http://otel-collector:4318
+      f13p1:
+        phaseType: fab-specific
+        routing:
+          primary: true
+          fallbackPhases: []
+        versions:
+          - name: v603
+            shadow: false
+            replica: 1
+            image:
+              repository: registry.internal/fab13/appA
+              tag: 2025.12.3
+              pullPolicy: IfNotPresent
+              digestPolicy:
+                enabled: true
+                allowedAlgorithms:
+                  - sha256
+                  - sha512
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+                ephemeral-storage: 1Gi
+              limits:
+                cpu: '2'
+                memory: 2Gi
+                ephemeral-storage: 4Gi
+              extended:
+                gpu:
+                  enabled: true
+                  vendor: nvidia.com/gpu
+                  count: 1
+            autoscaling:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 20
+              metrics:
+                - type: Resource
+                  resource:
+                    name: cpu
+                    target:
+                      type: Utilization
+                      averageUtilization: 70
+                - type: Pods
+                  pods:
+                    metric:
+                      name: requests_per_second
+                    target:
+                      type: AverageValue
+                      averageValue: '100'
+              behavior:
+                scaleUp:
+                  stabilizationWindowSeconds: 0
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 100
+                      periodSeconds: 60
+                    - type: Pods
+                      value: 4
+                      periodSeconds: 60
+                scaleDown:
+                  stabilizationWindowSeconds: 300
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 25
+                      periodSeconds: 60
+            deployment:
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 25%
+              progressDeadlineSeconds: 600
+              revisionHistoryLimit: 10
+              podAnnotations:
+                prometheus.io/scrape: 'true'
+                prometheus.io/port: '9080'
+              podLabels:
+                app.kubernetes.io/name: appA
+                platform/fab: fab13
+                platform/phase: f13p1
+            containers:
+              - name: main
+                ports:
+                  - name: http
+                    containerPort: 8080
+                  - name: management
+                    containerPort: 9080
+                env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: stg,f13,f13p1
+                  - name: FAB_CODE
+                    value: fab13
+                  - name: PHASE
+                    value: f13p1
+                  - name: CONFIG_VERSION
+                    value: v603
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: appA-f13p1-db
+                        key: password
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+                probes:
+                  liveness:
+                    httpGet:
+                      path: /actuator/health/liveness
+                      port: management
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  readiness:
+                    httpGet:
+                      path: /actuator/health/readiness
+                      port: management
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    failureThreshold: 6
+                  startup:
+                    httpGet:
+                      path: /actuator/health
+                      port: management
+                    periodSeconds: 5
+                    failureThreshold: 60
+                volumeMounts:
+                  - name: spring-config
+                    mountPath: /workspace/config
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                  - name: secret-store
+                    mountPath: /mnt/secrets-store
+                    readOnly: true
+              - name: metrics-sidecar
+                image:
+                  repository: registry.internal/sidecars/metrics
+                  tag: 1.8.2
+                ports:
+                  - name: metrics
+                    containerPort: 9090
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                env:
+                  - name: TARGET_PORT
+                    value: '9080'
+                  - name: PHASE
+                    value: f13p1
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: app.kubernetes.io/name
+                          operator: In
+                          values:
+                            - appA
+                        - key: platform/phase
+                          operator: In
+                          values:
+                            - f13p1
+                    topologyKey: kubernetes.io/hostname
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: platform/fab
+                            operator: In
+                            values:
+                              - fab13
+                      topologyKey: topology.kubernetes.io/zone
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: platform/fab
+                          operator: In
+                          values:
+                            - fab13
+                        - key: kubernetes.io/os
+                          operator: In
+                          values:
+                            - linux
+                        - key: node-role
+                          operator: NotIn
+                          values:
+                            - infra
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    preference:
+                      matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: In
+                          values:
+                            - zone-a
+                            - zone-b
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appA
+                    platform/phase: f13p1
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appA
+            volumes:
+              - name: spring-config
+                configMap:
+                  name: appA-v603-config
+                  items:
+                    - key: application.yaml
+                      path: application.yaml
+                    - key: log.xml
+                      path: log.xml
+              - name: tmp
+                emptyDir:
+                  sizeLimit: 1Gi
+              - name: secret-store
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: appA-fab13-stg
+            config:
+              bundle: appA-v603-config
+              spring:
+                profiles:
+                  - stg
+                  - f13
+                  - f13p1
+                configImport:
+                  - optional:configtree:/mnt/secrets-store/
+                  - optional:file:/workspace/config/
+              featureFlags:
+                newRouting: true
+                asyncWrite: true
+                phaseOverride: true
+              database:
+                pool:
+                  minimumIdle: 5
+                  maximumPoolSize: 20
+                  connectionTimeoutMs: 30000
+                readOnly: true
+              kafka:
+                consumer:
+                  groupId: appA-f13p1-v603
+                  concurrency: 3
+                  maxPollRecords: 500
+                producer:
+                  acks: all
+                  retries: 10
+              migration:
+                enabled: true
+                sourceVersion: v601
+                targetVersion: v604
+                strategy: rolling
+            observability:
+              serviceMonitor:
+                enabled: true
+                interval: 30s
+                scrapeTimeout: 10s
+                path: /actuator/prometheus
+              logging:
+                level: INFO
+                json: true
+                mdc:
+                  - fab
+                  - phase
+                  - version
+                  - traceId
+              tracing:
+                enabled: true
+                samplingProbability: 0.1
+                endpoint: http://otel-collector:4318
+          - name: v604
+            shadow: true
+            replica: 1
+            image:
+              repository: registry.internal/fab13/appA
+              tag: 2026.03.1
+              pullPolicy: IfNotPresent
+              digestPolicy:
+                enabled: true
+                allowedAlgorithms:
+                  - sha256
+                  - sha512
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+                ephemeral-storage: 1Gi
+              limits:
+                cpu: '2'
+                memory: 2Gi
+                ephemeral-storage: 4Gi
+              extended:
+                gpu:
+                  enabled: true
+                  vendor: nvidia.com/gpu
+                  count: 2
+            autoscaling:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 20
+              metrics:
+                - type: Resource
+                  resource:
+                    name: cpu
+                    target:
+                      type: Utilization
+                      averageUtilization: 70
+                - type: Pods
+                  pods:
+                    metric:
+                      name: requests_per_second
+                    target:
+                      type: AverageValue
+                      averageValue: '100'
+              behavior:
+                scaleUp:
+                  stabilizationWindowSeconds: 0
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 100
+                      periodSeconds: 60
+                    - type: Pods
+                      value: 4
+                      periodSeconds: 60
+                scaleDown:
+                  stabilizationWindowSeconds: 300
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 25
+                      periodSeconds: 60
+            deployment:
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 25%
+              progressDeadlineSeconds: 600
+              revisionHistoryLimit: 10
+              podAnnotations:
+                prometheus.io/scrape: 'true'
+                prometheus.io/port: '9080'
+              podLabels:
+                app.kubernetes.io/name: appA
+                platform/fab: fab13
+                platform/phase: f13p1
+            containers:
+              - name: main
+                ports:
+                  - name: http
+                    containerPort: 8080
+                  - name: management
+                    containerPort: 9080
+                env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: stg,f13,f13p1
+                  - name: FAB_CODE
+                    value: fab13
+                  - name: PHASE
+                    value: f13p1
+                  - name: CONFIG_VERSION
+                    value: v604
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: appA-f13p1-db
+                        key: password
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+                probes:
+                  liveness:
+                    httpGet:
+                      path: /actuator/health/liveness
+                      port: management
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  readiness:
+                    httpGet:
+                      path: /actuator/health/readiness
+                      port: management
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    failureThreshold: 6
+                  startup:
+                    httpGet:
+                      path: /actuator/health
+                      port: management
+                    periodSeconds: 5
+                    failureThreshold: 60
+                volumeMounts:
+                  - name: spring-config
+                    mountPath: /workspace/config
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                  - name: secret-store
+                    mountPath: /mnt/secrets-store
+                    readOnly: true
+              - name: metrics-sidecar
+                image:
+                  repository: registry.internal/sidecars/metrics
+                  tag: 1.8.2
+                ports:
+                  - name: metrics
+                    containerPort: 9090
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                env:
+                  - name: TARGET_PORT
+                    value: '9080'
+                  - name: PHASE
+                    value: f13p1
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: app.kubernetes.io/name
+                          operator: In
+                          values:
+                            - appA
+                        - key: platform/phase
+                          operator: In
+                          values:
+                            - f13p1
+                    topologyKey: kubernetes.io/hostname
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: platform/fab
+                            operator: In
+                            values:
+                              - fab13
+                      topologyKey: topology.kubernetes.io/zone
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: platform/fab
+                          operator: In
+                          values:
+                            - fab13
+                        - key: kubernetes.io/os
+                          operator: In
+                          values:
+                            - linux
+                        - key: node-role
+                          operator: NotIn
+                          values:
+                            - infra
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    preference:
+                      matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: In
+                          values:
+                            - zone-a
+                            - zone-b
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appA
+                    platform/phase: f13p1
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appA
+            volumes:
+              - name: spring-config
+                configMap:
+                  name: appA-v604-config
+                  items:
+                    - key: application.yaml
+                      path: application.yaml
+                    - key: log.xml
+                      path: log.xml
+              - name: tmp
+                emptyDir:
+                  sizeLimit: 1Gi
+              - name: secret-store
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: appA-fab13-stg
+            config:
+              bundle: appA-v604-config
+              spring:
+                profiles:
+                  - stg
+                  - f13
+                  - f13p1
+                configImport:
+                  - optional:configtree:/mnt/secrets-store/
+                  - optional:file:/workspace/config/
+              featureFlags:
+                newRouting: true
+                asyncWrite: true
+                phaseOverride: true
+              database:
+                pool:
+                  minimumIdle: 5
+                  maximumPoolSize: 20
+                  connectionTimeoutMs: 30000
+                readOnly: false
+              kafka:
+                consumer:
+                  groupId: appA-f13p1-v604
+                  concurrency: 3
+                  maxPollRecords: 500
+                producer:
+                  acks: all
+                  retries: 10
+              migration:
+                enabled: true
+                sourceVersion: v601
+                targetVersion: v604
+                strategy: rolling
+            observability:
+              serviceMonitor:
+                enabled: true
+                interval: 30s
+                scrapeTimeout: 10s
+                path: /actuator/prometheus
+              logging:
+                level: INFO
+                json: true
+                mdc:
+                  - fab
+                  - phase
+                  - version
+                  - traceId
+              tracing:
+                enabled: true
+                samplingProbability: 0.1
+                endpoint: http://otel-collector:4318
+  appB:
+    spring: true
+    configMode: versioned
+    configRoot: config/appB
+    activeVersion: v603
+    service:
+      type: ClusterIP
+      ports:
+        - name: http
+          port: 80
+          targetPort: http
+        - name: management
+          port: 9080
+          targetPort: management
+    ingress:
+      enabled: true
+      className: nginx
+      hosts:
+        - host: appB.stg.fab13.internal
+          paths:
+            - path: /
+              pathType: Prefix
+              servicePort: http
+            - path: /actuator
+              pathType: Prefix
+              servicePort: management
+    phases:
+      p1:
+        phaseType: standard
+        routing:
+          primary: true
+          fallbackPhases:
+            - p5
+            - p6
+        versions:
+          - name: v601
+            shadow: true
+            replica: 1
+            image:
+              repository: registry.internal/fab13/appB
+              tag: 2025.12.1
+              pullPolicy: IfNotPresent
+              digestPolicy:
+                enabled: true
+                allowedAlgorithms:
+                  - sha256
+                  - sha512
+            resources:
+              requests:
+                cpu: 250m
+                memory: 512Mi
+                ephemeral-storage: 1Gi
+              limits:
+                cpu: '2'
+                memory: 2Gi
+                ephemeral-storage: 4Gi
+              extended:
+                gpu:
+                  enabled: false
+                  vendor: nvidia.com/gpu
+                  count: 0
+            autoscaling:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 10
+              metrics:
+                - type: Resource
+                  resource:
+                    name: cpu
+                    target:
+                      type: Utilization
+                      averageUtilization: 70
+                - type: Pods
+                  pods:
+                    metric:
+                      name: requests_per_second
+                    target:
+                      type: AverageValue
+                      averageValue: '100'
+              behavior:
+                scaleUp:
+                  stabilizationWindowSeconds: 0
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 100
+                      periodSeconds: 60
+                    - type: Pods
+                      value: 4
+                      periodSeconds: 60
+                scaleDown:
+                  stabilizationWindowSeconds: 300
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 25
+                      periodSeconds: 60
+            deployment:
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 25%
+              progressDeadlineSeconds: 600
+              revisionHistoryLimit: 10
+              podAnnotations:
+                prometheus.io/scrape: 'true'
+                prometheus.io/port: '9080'
+              podLabels:
+                app.kubernetes.io/name: appB
+                platform/fab: fab13
+                platform/phase: p1
+            containers:
+              - name: main
+                ports:
+                  - name: http
+                    containerPort: 8081
+                  - name: management
+                    containerPort: 9080
+                env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: stg,f13,p1
+                  - name: FAB_CODE
+                    value: fab13
+                  - name: PHASE
+                    value: p1
+                  - name: CONFIG_VERSION
+                    value: v601
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: appB-p1-db
+                        key: password
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+                probes:
+                  liveness:
+                    httpGet:
+                      path: /actuator/health/liveness
+                      port: management
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  readiness:
+                    httpGet:
+                      path: /actuator/health/readiness
+                      port: management
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    failureThreshold: 6
+                  startup:
+                    httpGet:
+                      path: /actuator/health
+                      port: management
+                    periodSeconds: 5
+                    failureThreshold: 60
+                volumeMounts:
+                  - name: spring-config
+                    mountPath: /workspace/config
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                  - name: secret-store
+                    mountPath: /mnt/secrets-store
+                    readOnly: true
+              - name: metrics-sidecar
+                image:
+                  repository: registry.internal/sidecars/metrics
+                  tag: 1.8.2
+                ports:
+                  - name: metrics
+                    containerPort: 9090
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                env:
+                  - name: TARGET_PORT
+                    value: '9080'
+                  - name: PHASE
+                    value: p1
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: app.kubernetes.io/name
+                          operator: In
+                          values:
+                            - appB
+                        - key: platform/phase
+                          operator: In
+                          values:
+                            - p1
+                    topologyKey: kubernetes.io/hostname
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: platform/fab
+                            operator: In
+                            values:
+                              - fab13
+                      topologyKey: topology.kubernetes.io/zone
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: platform/fab
+                          operator: In
+                          values:
+                            - fab13
+                        - key: kubernetes.io/os
+                          operator: In
+                          values:
+                            - linux
+                        - key: node-role
+                          operator: NotIn
+                          values:
+                            - infra
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    preference:
+                      matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: In
+                          values:
+                            - zone-a
+                            - zone-b
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appB
+                    platform/phase: p1
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appB
+            volumes:
+              - name: spring-config
+                configMap:
+                  name: appB-v601-config
+                  items:
+                    - key: application.yaml
+                      path: application.yaml
+                    - key: log.xml
+                      path: log.xml
+              - name: tmp
+                emptyDir:
+                  sizeLimit: 1Gi
+              - name: secret-store
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: appB-fab13-stg
+            config:
+              bundle: appB-v601-config
+              spring:
+                profiles:
+                  - stg
+                  - f13
+                  - p1
+                configImport:
+                  - optional:configtree:/mnt/secrets-store/
+                  - optional:file:/workspace/config/
+              featureFlags:
+                newRouting: false
+                asyncWrite: true
+                phaseOverride: false
+              database:
+                pool:
+                  minimumIdle: 5
+                  maximumPoolSize: 20
+                  connectionTimeoutMs: 30000
+                readOnly: true
+              kafka:
+                consumer:
+                  groupId: appB-p1-v601
+                  concurrency: 3
+                  maxPollRecords: 500
+                producer:
+                  acks: all
+                  retries: 10
+            observability:
+              serviceMonitor:
+                enabled: true
+                interval: 30s
+                scrapeTimeout: 10s
+                path: /actuator/prometheus
+              logging:
+                level: INFO
+                json: true
+                mdc:
+                  - fab
+                  - phase
+                  - version
+                  - traceId
+              tracing:
+                enabled: true
+                samplingProbability: 0.1
+                endpoint: http://otel-collector:4318
+          - name: v603
+            shadow: true
+            replica: 1
+            image:
+              repository: registry.internal/fab13/appB
+              tag: 2025.12.1
+              pullPolicy: IfNotPresent
+              digestPolicy:
+                enabled: true
+                allowedAlgorithms:
+                  - sha256
+                  - sha512
+            resources:
+              requests:
+                cpu: 250m
+                memory: 512Mi
+                ephemeral-storage: 1Gi
+              limits:
+                cpu: '2'
+                memory: 2Gi
+                ephemeral-storage: 4Gi
+              extended:
+                gpu:
+                  enabled: false
+                  vendor: nvidia.com/gpu
+                  count: 0
+            autoscaling:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 10
+              metrics:
+                - type: Resource
+                  resource:
+                    name: cpu
+                    target:
+                      type: Utilization
+                      averageUtilization: 70
+                - type: Pods
+                  pods:
+                    metric:
+                      name: requests_per_second
+                    target:
+                      type: AverageValue
+                      averageValue: '100'
+              behavior:
+                scaleUp:
+                  stabilizationWindowSeconds: 0
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 100
+                      periodSeconds: 60
+                    - type: Pods
+                      value: 4
+                      periodSeconds: 60
+                scaleDown:
+                  stabilizationWindowSeconds: 300
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 25
+                      periodSeconds: 60
+            deployment:
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 25%
+              progressDeadlineSeconds: 600
+              revisionHistoryLimit: 10
+              podAnnotations:
+                prometheus.io/scrape: 'true'
+                prometheus.io/port: '9080'
+              podLabels:
+                app.kubernetes.io/name: appB
+                platform/fab: fab13
+                platform/phase: p1
+            containers:
+              - name: main
+                ports:
+                  - name: http
+                    containerPort: 8081
+                  - name: management
+                    containerPort: 9080
+                env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: stg,f13,p1
+                  - name: FAB_CODE
+                    value: fab13
+                  - name: PHASE
+                    value: p1
+                  - name: CONFIG_VERSION
+                    value: v603
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: appB-p1-db
+                        key: password
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+                probes:
+                  liveness:
+                    httpGet:
+                      path: /actuator/health/liveness
+                      port: management
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  readiness:
+                    httpGet:
+                      path: /actuator/health/readiness
+                      port: management
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    failureThreshold: 6
+                  startup:
+                    httpGet:
+                      path: /actuator/health
+                      port: management
+                    periodSeconds: 5
+                    failureThreshold: 60
+                volumeMounts:
+                  - name: spring-config
+                    mountPath: /workspace/config
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                  - name: secret-store
+                    mountPath: /mnt/secrets-store
+                    readOnly: true
+              - name: metrics-sidecar
+                image:
+                  repository: registry.internal/sidecars/metrics
+                  tag: 1.8.2
+                ports:
+                  - name: metrics
+                    containerPort: 9090
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                env:
+                  - name: TARGET_PORT
+                    value: '9080'
+                  - name: PHASE
+                    value: p1
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: app.kubernetes.io/name
+                          operator: In
+                          values:
+                            - appB
+                        - key: platform/phase
+                          operator: In
+                          values:
+                            - p1
+                    topologyKey: kubernetes.io/hostname
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: platform/fab
+                            operator: In
+                            values:
+                              - fab13
+                      topologyKey: topology.kubernetes.io/zone
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: platform/fab
+                          operator: In
+                          values:
+                            - fab13
+                        - key: kubernetes.io/os
+                          operator: In
+                          values:
+                            - linux
+                        - key: node-role
+                          operator: NotIn
+                          values:
+                            - infra
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    preference:
+                      matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: In
+                          values:
+                            - zone-a
+                            - zone-b
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appB
+                    platform/phase: p1
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appB
+            volumes:
+              - name: spring-config
+                configMap:
+                  name: appB-v603-config
+                  items:
+                    - key: application.yaml
+                      path: application.yaml
+                    - key: log.xml
+                      path: log.xml
+              - name: tmp
+                emptyDir:
+                  sizeLimit: 1Gi
+              - name: secret-store
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: appB-fab13-stg
+            config:
+              bundle: appB-v603-config
+              spring:
+                profiles:
+                  - stg
+                  - f13
+                  - p1
+                configImport:
+                  - optional:configtree:/mnt/secrets-store/
+                  - optional:file:/workspace/config/
+              featureFlags:
+                newRouting: false
+                asyncWrite: true
+                phaseOverride: false
+              database:
+                pool:
+                  minimumIdle: 5
+                  maximumPoolSize: 20
+                  connectionTimeoutMs: 30000
+                readOnly: true
+              kafka:
+                consumer:
+                  groupId: appB-p1-v603
+                  concurrency: 3
+                  maxPollRecords: 500
+                producer:
+                  acks: all
+                  retries: 10
+            observability:
+              serviceMonitor:
+                enabled: true
+                interval: 30s
+                scrapeTimeout: 10s
+                path: /actuator/prometheus
+              logging:
+                level: INFO
+                json: true
+                mdc:
+                  - fab
+                  - phase
+                  - version
+                  - traceId
+              tracing:
+                enabled: true
+                samplingProbability: 0.1
+                endpoint: http://otel-collector:4318
+      p2:
+        phaseType: standard
+        routing:
+          primary: true
+          fallbackPhases:
+            - p5
+            - p6
+        versions:
+          - name: v601
+            shadow: true
+            replica: 1
+            image:
+              repository: registry.internal/fab13/appB
+              tag: 2025.12.2
+              pullPolicy: IfNotPresent
+              digestPolicy:
+                enabled: true
+                allowedAlgorithms:
+                  - sha256
+                  - sha512
+            resources:
+              requests:
+                cpu: 250m
+                memory: 512Mi
+                ephemeral-storage: 1Gi
+              limits:
+                cpu: '2'
+                memory: 2Gi
+                ephemeral-storage: 4Gi
+              extended:
+                gpu:
+                  enabled: false
+                  vendor: nvidia.com/gpu
+                  count: 0
+            autoscaling:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 10
+              metrics:
+                - type: Resource
+                  resource:
+                    name: cpu
+                    target:
+                      type: Utilization
+                      averageUtilization: 70
+                - type: Pods
+                  pods:
+                    metric:
+                      name: requests_per_second
+                    target:
+                      type: AverageValue
+                      averageValue: '100'
+              behavior:
+                scaleUp:
+                  stabilizationWindowSeconds: 0
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 100
+                      periodSeconds: 60
+                    - type: Pods
+                      value: 4
+                      periodSeconds: 60
+                scaleDown:
+                  stabilizationWindowSeconds: 300
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 25
+                      periodSeconds: 60
+            deployment:
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 25%
+              progressDeadlineSeconds: 600
+              revisionHistoryLimit: 10
+              podAnnotations:
+                prometheus.io/scrape: 'true'
+                prometheus.io/port: '9080'
+              podLabels:
+                app.kubernetes.io/name: appB
+                platform/fab: fab13
+                platform/phase: p2
+            containers:
+              - name: main
+                ports:
+                  - name: http
+                    containerPort: 8081
+                  - name: management
+                    containerPort: 9080
+                env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: stg,f13,p2
+                  - name: FAB_CODE
+                    value: fab13
+                  - name: PHASE
+                    value: p2
+                  - name: CONFIG_VERSION
+                    value: v601
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: appB-p2-db
+                        key: password
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+                probes:
+                  liveness:
+                    httpGet:
+                      path: /actuator/health/liveness
+                      port: management
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  readiness:
+                    httpGet:
+                      path: /actuator/health/readiness
+                      port: management
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    failureThreshold: 6
+                  startup:
+                    httpGet:
+                      path: /actuator/health
+                      port: management
+                    periodSeconds: 5
+                    failureThreshold: 60
+                volumeMounts:
+                  - name: spring-config
+                    mountPath: /workspace/config
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                  - name: secret-store
+                    mountPath: /mnt/secrets-store
+                    readOnly: true
+              - name: metrics-sidecar
+                image:
+                  repository: registry.internal/sidecars/metrics
+                  tag: 1.8.2
+                ports:
+                  - name: metrics
+                    containerPort: 9090
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                env:
+                  - name: TARGET_PORT
+                    value: '9080'
+                  - name: PHASE
+                    value: p2
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: app.kubernetes.io/name
+                          operator: In
+                          values:
+                            - appB
+                        - key: platform/phase
+                          operator: In
+                          values:
+                            - p2
+                    topologyKey: kubernetes.io/hostname
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: platform/fab
+                            operator: In
+                            values:
+                              - fab13
+                      topologyKey: topology.kubernetes.io/zone
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: platform/fab
+                          operator: In
+                          values:
+                            - fab13
+                        - key: kubernetes.io/os
+                          operator: In
+                          values:
+                            - linux
+                        - key: node-role
+                          operator: NotIn
+                          values:
+                            - infra
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    preference:
+                      matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: In
+                          values:
+                            - zone-a
+                            - zone-b
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appB
+                    platform/phase: p2
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appB
+            volumes:
+              - name: spring-config
+                configMap:
+                  name: appB-v601-config
+                  items:
+                    - key: application.yaml
+                      path: application.yaml
+                    - key: log.xml
+                      path: log.xml
+              - name: tmp
+                emptyDir:
+                  sizeLimit: 1Gi
+              - name: secret-store
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: appB-fab13-stg
+            config:
+              bundle: appB-v601-config
+              spring:
+                profiles:
+                  - stg
+                  - f13
+                  - p2
+                configImport:
+                  - optional:configtree:/mnt/secrets-store/
+                  - optional:file:/workspace/config/
+              featureFlags:
+                newRouting: false
+                asyncWrite: true
+                phaseOverride: false
+              database:
+                pool:
+                  minimumIdle: 5
+                  maximumPoolSize: 20
+                  connectionTimeoutMs: 30000
+                readOnly: true
+              kafka:
+                consumer:
+                  groupId: appB-p2-v601
+                  concurrency: 3
+                  maxPollRecords: 500
+                producer:
+                  acks: all
+                  retries: 10
+            observability:
+              serviceMonitor:
+                enabled: true
+                interval: 30s
+                scrapeTimeout: 10s
+                path: /actuator/prometheus
+              logging:
+                level: INFO
+                json: true
+                mdc:
+                  - fab
+                  - phase
+                  - version
+                  - traceId
+              tracing:
+                enabled: true
+                samplingProbability: 0.1
+                endpoint: http://otel-collector:4318
+          - name: v603
+            shadow: true
+            replica: 1
+            image:
+              repository: registry.internal/fab13/appB
+              tag: 2025.12.2
+              pullPolicy: IfNotPresent
+              digestPolicy:
+                enabled: true
+                allowedAlgorithms:
+                  - sha256
+                  - sha512
+            resources:
+              requests:
+                cpu: 250m
+                memory: 512Mi
+                ephemeral-storage: 1Gi
+              limits:
+                cpu: '2'
+                memory: 2Gi
+                ephemeral-storage: 4Gi
+              extended:
+                gpu:
+                  enabled: false
+                  vendor: nvidia.com/gpu
+                  count: 0
+            autoscaling:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 10
+              metrics:
+                - type: Resource
+                  resource:
+                    name: cpu
+                    target:
+                      type: Utilization
+                      averageUtilization: 70
+                - type: Pods
+                  pods:
+                    metric:
+                      name: requests_per_second
+                    target:
+                      type: AverageValue
+                      averageValue: '100'
+              behavior:
+                scaleUp:
+                  stabilizationWindowSeconds: 0
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 100
+                      periodSeconds: 60
+                    - type: Pods
+                      value: 4
+                      periodSeconds: 60
+                scaleDown:
+                  stabilizationWindowSeconds: 300
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 25
+                      periodSeconds: 60
+            deployment:
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 25%
+              progressDeadlineSeconds: 600
+              revisionHistoryLimit: 10
+              podAnnotations:
+                prometheus.io/scrape: 'true'
+                prometheus.io/port: '9080'
+              podLabels:
+                app.kubernetes.io/name: appB
+                platform/fab: fab13
+                platform/phase: p2
+            containers:
+              - name: main
+                ports:
+                  - name: http
+                    containerPort: 8081
+                  - name: management
+                    containerPort: 9080
+                env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: stg,f13,p2
+                  - name: FAB_CODE
+                    value: fab13
+                  - name: PHASE
+                    value: p2
+                  - name: CONFIG_VERSION
+                    value: v603
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: appB-p2-db
+                        key: password
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+                probes:
+                  liveness:
+                    httpGet:
+                      path: /actuator/health/liveness
+                      port: management
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  readiness:
+                    httpGet:
+                      path: /actuator/health/readiness
+                      port: management
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    failureThreshold: 6
+                  startup:
+                    httpGet:
+                      path: /actuator/health
+                      port: management
+                    periodSeconds: 5
+                    failureThreshold: 60
+                volumeMounts:
+                  - name: spring-config
+                    mountPath: /workspace/config
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                  - name: secret-store
+                    mountPath: /mnt/secrets-store
+                    readOnly: true
+              - name: metrics-sidecar
+                image:
+                  repository: registry.internal/sidecars/metrics
+                  tag: 1.8.2
+                ports:
+                  - name: metrics
+                    containerPort: 9090
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                env:
+                  - name: TARGET_PORT
+                    value: '9080'
+                  - name: PHASE
+                    value: p2
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: app.kubernetes.io/name
+                          operator: In
+                          values:
+                            - appB
+                        - key: platform/phase
+                          operator: In
+                          values:
+                            - p2
+                    topologyKey: kubernetes.io/hostname
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: platform/fab
+                            operator: In
+                            values:
+                              - fab13
+                      topologyKey: topology.kubernetes.io/zone
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: platform/fab
+                          operator: In
+                          values:
+                            - fab13
+                        - key: kubernetes.io/os
+                          operator: In
+                          values:
+                            - linux
+                        - key: node-role
+                          operator: NotIn
+                          values:
+                            - infra
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    preference:
+                      matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: In
+                          values:
+                            - zone-a
+                            - zone-b
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appB
+                    platform/phase: p2
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appB
+            volumes:
+              - name: spring-config
+                configMap:
+                  name: appB-v603-config
+                  items:
+                    - key: application.yaml
+                      path: application.yaml
+                    - key: log.xml
+                      path: log.xml
+              - name: tmp
+                emptyDir:
+                  sizeLimit: 1Gi
+              - name: secret-store
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: appB-fab13-stg
+            config:
+              bundle: appB-v603-config
+              spring:
+                profiles:
+                  - stg
+                  - f13
+                  - p2
+                configImport:
+                  - optional:configtree:/mnt/secrets-store/
+                  - optional:file:/workspace/config/
+              featureFlags:
+                newRouting: false
+                asyncWrite: true
+                phaseOverride: false
+              database:
+                pool:
+                  minimumIdle: 5
+                  maximumPoolSize: 20
+                  connectionTimeoutMs: 30000
+                readOnly: true
+              kafka:
+                consumer:
+                  groupId: appB-p2-v603
+                  concurrency: 3
+                  maxPollRecords: 500
+                producer:
+                  acks: all
+                  retries: 10
+            observability:
+              serviceMonitor:
+                enabled: true
+                interval: 30s
+                scrapeTimeout: 10s
+                path: /actuator/prometheus
+              logging:
+                level: INFO
+                json: true
+                mdc:
+                  - fab
+                  - phase
+                  - version
+                  - traceId
+              tracing:
+                enabled: true
+                samplingProbability: 0.1
+                endpoint: http://otel-collector:4318
+      f13p1:
+        phaseType: fab-specific
+        routing:
+          primary: true
+          fallbackPhases: []
+        versions:
+          - name: v601
+            shadow: true
+            replica: 1
+            image:
+              repository: registry.internal/fab13/appB
+              tag: 2025.12.3
+              pullPolicy: IfNotPresent
+              digestPolicy:
+                enabled: true
+                allowedAlgorithms:
+                  - sha256
+                  - sha512
+            resources:
+              requests:
+                cpu: 250m
+                memory: 512Mi
+                ephemeral-storage: 1Gi
+              limits:
+                cpu: '2'
+                memory: 2Gi
+                ephemeral-storage: 4Gi
+              extended:
+                gpu:
+                  enabled: true
+                  vendor: nvidia.com/gpu
+                  count: 1
+            autoscaling:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 10
+              metrics:
+                - type: Resource
+                  resource:
+                    name: cpu
+                    target:
+                      type: Utilization
+                      averageUtilization: 70
+                - type: Pods
+                  pods:
+                    metric:
+                      name: requests_per_second
+                    target:
+                      type: AverageValue
+                      averageValue: '100'
+              behavior:
+                scaleUp:
+                  stabilizationWindowSeconds: 0
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 100
+                      periodSeconds: 60
+                    - type: Pods
+                      value: 4
+                      periodSeconds: 60
+                scaleDown:
+                  stabilizationWindowSeconds: 300
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 25
+                      periodSeconds: 60
+            deployment:
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 25%
+              progressDeadlineSeconds: 600
+              revisionHistoryLimit: 10
+              podAnnotations:
+                prometheus.io/scrape: 'true'
+                prometheus.io/port: '9080'
+              podLabels:
+                app.kubernetes.io/name: appB
+                platform/fab: fab13
+                platform/phase: f13p1
+            containers:
+              - name: main
+                ports:
+                  - name: http
+                    containerPort: 8081
+                  - name: management
+                    containerPort: 9080
+                env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: stg,f13,f13p1
+                  - name: FAB_CODE
+                    value: fab13
+                  - name: PHASE
+                    value: f13p1
+                  - name: CONFIG_VERSION
+                    value: v601
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: appB-f13p1-db
+                        key: password
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+                probes:
+                  liveness:
+                    httpGet:
+                      path: /actuator/health/liveness
+                      port: management
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  readiness:
+                    httpGet:
+                      path: /actuator/health/readiness
+                      port: management
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    failureThreshold: 6
+                  startup:
+                    httpGet:
+                      path: /actuator/health
+                      port: management
+                    periodSeconds: 5
+                    failureThreshold: 60
+                volumeMounts:
+                  - name: spring-config
+                    mountPath: /workspace/config
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                  - name: secret-store
+                    mountPath: /mnt/secrets-store
+                    readOnly: true
+              - name: metrics-sidecar
+                image:
+                  repository: registry.internal/sidecars/metrics
+                  tag: 1.8.2
+                ports:
+                  - name: metrics
+                    containerPort: 9090
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                env:
+                  - name: TARGET_PORT
+                    value: '9080'
+                  - name: PHASE
+                    value: f13p1
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: app.kubernetes.io/name
+                          operator: In
+                          values:
+                            - appB
+                        - key: platform/phase
+                          operator: In
+                          values:
+                            - f13p1
+                    topologyKey: kubernetes.io/hostname
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: platform/fab
+                            operator: In
+                            values:
+                              - fab13
+                      topologyKey: topology.kubernetes.io/zone
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: platform/fab
+                          operator: In
+                          values:
+                            - fab13
+                        - key: kubernetes.io/os
+                          operator: In
+                          values:
+                            - linux
+                        - key: node-role
+                          operator: NotIn
+                          values:
+                            - infra
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    preference:
+                      matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: In
+                          values:
+                            - zone-a
+                            - zone-b
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appB
+                    platform/phase: f13p1
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appB
+            volumes:
+              - name: spring-config
+                configMap:
+                  name: appB-v601-config
+                  items:
+                    - key: application.yaml
+                      path: application.yaml
+                    - key: log.xml
+                      path: log.xml
+              - name: tmp
+                emptyDir:
+                  sizeLimit: 1Gi
+              - name: secret-store
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: appB-fab13-stg
+            config:
+              bundle: appB-v601-config
+              spring:
+                profiles:
+                  - stg
+                  - f13
+                  - f13p1
+                configImport:
+                  - optional:configtree:/mnt/secrets-store/
+                  - optional:file:/workspace/config/
+              featureFlags:
+                newRouting: false
+                asyncWrite: true
+                phaseOverride: true
+              database:
+                pool:
+                  minimumIdle: 5
+                  maximumPoolSize: 20
+                  connectionTimeoutMs: 30000
+                readOnly: true
+              kafka:
+                consumer:
+                  groupId: appB-f13p1-v601
+                  concurrency: 3
+                  maxPollRecords: 500
+                producer:
+                  acks: all
+                  retries: 10
+            observability:
+              serviceMonitor:
+                enabled: true
+                interval: 30s
+                scrapeTimeout: 10s
+                path: /actuator/prometheus
+              logging:
+                level: INFO
+                json: true
+                mdc:
+                  - fab
+                  - phase
+                  - version
+                  - traceId
+              tracing:
+                enabled: true
+                samplingProbability: 0.1
+                endpoint: http://otel-collector:4318
+          - name: v603
+            shadow: true
+            replica: 1
+            image:
+              repository: registry.internal/fab13/appB
+              tag: 2025.12.3
+              pullPolicy: IfNotPresent
+              digestPolicy:
+                enabled: true
+                allowedAlgorithms:
+                  - sha256
+                  - sha512
+            resources:
+              requests:
+                cpu: 250m
+                memory: 512Mi
+                ephemeral-storage: 1Gi
+              limits:
+                cpu: '2'
+                memory: 2Gi
+                ephemeral-storage: 4Gi
+              extended:
+                gpu:
+                  enabled: true
+                  vendor: nvidia.com/gpu
+                  count: 1
+            autoscaling:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 10
+              metrics:
+                - type: Resource
+                  resource:
+                    name: cpu
+                    target:
+                      type: Utilization
+                      averageUtilization: 70
+                - type: Pods
+                  pods:
+                    metric:
+                      name: requests_per_second
+                    target:
+                      type: AverageValue
+                      averageValue: '100'
+              behavior:
+                scaleUp:
+                  stabilizationWindowSeconds: 0
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 100
+                      periodSeconds: 60
+                    - type: Pods
+                      value: 4
+                      periodSeconds: 60
+                scaleDown:
+                  stabilizationWindowSeconds: 300
+                  selectPolicy: Max
+                  policies:
+                    - type: Percent
+                      value: 25
+                      periodSeconds: 60
+            deployment:
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 25%
+              progressDeadlineSeconds: 600
+              revisionHistoryLimit: 10
+              podAnnotations:
+                prometheus.io/scrape: 'true'
+                prometheus.io/port: '9080'
+              podLabels:
+                app.kubernetes.io/name: appB
+                platform/fab: fab13
+                platform/phase: f13p1
+            containers:
+              - name: main
+                ports:
+                  - name: http
+                    containerPort: 8081
+                  - name: management
+                    containerPort: 9080
+                env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: stg,f13,f13p1
+                  - name: FAB_CODE
+                    value: fab13
+                  - name: PHASE
+                    value: f13p1
+                  - name: CONFIG_VERSION
+                    value: v603
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: appB-f13p1-db
+                        key: password
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+                probes:
+                  liveness:
+                    httpGet:
+                      path: /actuator/health/liveness
+                      port: management
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  readiness:
+                    httpGet:
+                      path: /actuator/health/readiness
+                      port: management
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    failureThreshold: 6
+                  startup:
+                    httpGet:
+                      path: /actuator/health
+                      port: management
+                    periodSeconds: 5
+                    failureThreshold: 60
+                volumeMounts:
+                  - name: spring-config
+                    mountPath: /workspace/config
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                  - name: secret-store
+                    mountPath: /mnt/secrets-store
+                    readOnly: true
+              - name: metrics-sidecar
+                image:
+                  repository: registry.internal/sidecars/metrics
+                  tag: 1.8.2
+                ports:
+                  - name: metrics
+                    containerPort: 9090
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                env:
+                  - name: TARGET_PORT
+                    value: '9080'
+                  - name: PHASE
+                    value: f13p1
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: app.kubernetes.io/name
+                          operator: In
+                          values:
+                            - appB
+                        - key: platform/phase
+                          operator: In
+                          values:
+                            - f13p1
+                    topologyKey: kubernetes.io/hostname
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: platform/fab
+                            operator: In
+                            values:
+                              - fab13
+                      topologyKey: topology.kubernetes.io/zone
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: platform/fab
+                          operator: In
+                          values:
+                            - fab13
+                        - key: kubernetes.io/os
+                          operator: In
+                          values:
+                            - linux
+                        - key: node-role
+                          operator: NotIn
+                          values:
+                            - infra
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    preference:
+                      matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: In
+                          values:
+                            - zone-a
+                            - zone-b
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appB
+                    platform/phase: f13p1
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: appB
+            volumes:
+              - name: spring-config
+                configMap:
+                  name: appB-v603-config
+                  items:
+                    - key: application.yaml
+                      path: application.yaml
+                    - key: log.xml
+                      path: log.xml
+              - name: tmp
+                emptyDir:
+                  sizeLimit: 1Gi
+              - name: secret-store
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: appB-fab13-stg
+            config:
+              bundle: appB-v603-config
+              spring:
+                profiles:
+                  - stg
+                  - f13
+                  - f13p1
+                configImport:
+                  - optional:configtree:/mnt/secrets-store/
+                  - optional:file:/workspace/config/
+              featureFlags:
+                newRouting: false
+                asyncWrite: true
+                phaseOverride: true
+              database:
+                pool:
+                  minimumIdle: 5
+                  maximumPoolSize: 20
+                  connectionTimeoutMs: 30000
+                readOnly: true
+              kafka:
+                consumer:
+                  groupId: appB-f13p1-v603
+                  concurrency: 3
+                  maxPollRecords: 500
+                producer:
+                  acks: all
+                  retries: 10
+            observability:
+              serviceMonitor:
+                enabled: true
+                interval: 30s
+                scrapeTimeout: 10s
+                path: /actuator/prometheus
+              logging:
+                level: INFO
+                json: true
+                mdc:
+                  - fab
+                  - phase
+                  - version
+                  - traceId
+              tracing:
+                enabled: true
+                samplingProbability: 0.1
+                endpoint: http://otel-collector:4318

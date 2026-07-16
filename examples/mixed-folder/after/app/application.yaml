@@ -1,0 +1,6 @@
+# application
+server:
+  port: 9090
+  retry:
+    count: 3
+    delays: [1, 5, 15]

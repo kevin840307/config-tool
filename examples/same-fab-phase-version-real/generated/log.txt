@@ -1,0 +1,6 @@
+INFO file-key variable: config/appB/v507/application.yaml -> config/appB/{{ old_version }}/application.yaml
+INFO file-key variable: config/appB/v507/log.xml -> config/appB/{{ old_version }}/log.xml
+INFO file-key variable: config/appB/v509/application.yaml -> config/appB/{{ current_version }}/application.yaml
+INFO file-key variable: config/appB/v509/log.xml -> config/appB/{{ current_version }}/log.xml
+INFO file-key variable: config/appB/v510/application.yaml -> config/appB/{{ new_version }}/application.yaml
+INFO file-key variable: config/appB/v510/log.xml -> config/appB/{{ new_version }}/log.xml

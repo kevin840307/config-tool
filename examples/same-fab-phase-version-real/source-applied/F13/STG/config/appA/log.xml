@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration scan="true" scanPeriod="30 seconds">
+  <property name="APP" value="appA"/>
+  <property name="VERSION" value="v509"/>
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LoggingEventCompositeJsonEncoder">
+      <providers><timestamp/><logLevel/><loggerName/><message/><mdc/><stackTrace/></providers>
+    </encoder>
+  </appender>
+  <logger name="org.springframework" level="WARN" additivity="false"><appender-ref ref="CONSOLE"/></logger>
+  <logger name="org.apache.kafka" level="WARN"/>
+  <root level="WARN"><appender-ref ref="CONSOLE"/></root>
+</configuration>

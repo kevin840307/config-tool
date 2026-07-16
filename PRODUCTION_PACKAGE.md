@@ -1,4 +1,4 @@
-# Production Package v0.10.0-rc1
+# Production Package v0.10.0-rc27
 
 包含 YAML/XML CLI、mixed-folder runner、完整中文文件與 examples。
 
@@ -57,3 +57,8 @@ python benchmark.py
 ```
 
 產物：`release-check-report.json`、`benchmark-report.json`。這些報告為本機執行結果，不代表未實際執行的平台。
+
+
+## Optimizer resource protection
+
+Optional auto-config simplification is bounded by a five-second per-document budget, 2,000 replay candidates, fixed-point round limits, and repeated-state detection. On any limit, the compiler keeps the last replay-verified configuration and continues final verification.

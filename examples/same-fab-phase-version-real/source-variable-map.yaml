@@ -1,0 +1,5 @@
+variable_map:
+  global:
+    old_version: v507
+    current_version: v509
+    new_version: v510

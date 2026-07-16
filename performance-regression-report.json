@@ -1,0 +1,21 @@
+{
+  "version": "0.10.0-rc27",
+  "baseline": "0.10.0-rc25",
+  "enterprise_helm": {
+    "lines": 13385,
+    "baseline_compile_seconds": 12.016,
+    "optimized_compile_seconds": 8.617,
+    "improvement_percent": 28.29,
+    "operations_before": 8,
+    "operations_after": 8,
+    "golden_config_sha256_identical": true
+  },
+  "large_complex": {
+    "lines": 8976,
+    "optimized_compile_seconds": 7.44,
+    "operations": 2,
+    "verified": true
+  },
+  "same_fab_fixture_patch_sha256_identical": true,
+  "semantic_changes": false
+}
