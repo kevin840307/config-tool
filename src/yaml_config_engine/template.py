@@ -1,19 +1,40 @@
 from __future__ import annotations
 from copy import deepcopy
 from typing import Any
-from jinja2 import Environment, StrictUndefined
+from functools import lru_cache
+from jinja2 import Environment, StrictUndefined, Undefined
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 _env = Environment(undefined=StrictUndefined, autoescape=False)
 
 
+@lru_cache(maxsize=4096)
+def _compiled_expression(expr: str):
+    return _env.compile_expression(expr, undefined_to_none=False)
+
+
+@lru_cache(maxsize=4096)
+def _compiled_template(value: str):
+    return _env.from_string(value)
+
+
 def _render_string(value: str, context: dict[str, Any]) -> Any:
+    # Most configuration scalar strings are literals. Avoid invoking Jinja at
+    # all unless the value actually contains template syntax. This is semantic-
+    # preserving and removes the dominant replay cost for large YAML files.
+    if "{{" not in value and "{%" not in value and "{#" not in value:
+        return value
     stripped = value.strip()
     if stripped.startswith("{{") and stripped.endswith("}}") and stripped.count("{{") == 1:
         expr = stripped[2:-2].strip()
-        rendered = _env.compile_expression(expr, undefined_to_none=False)(**context)
+        rendered = _compiled_expression(expr)(**context)
+        if isinstance(rendered, Undefined):
+            # ``compile_expression(..., undefined_to_none=False)`` returns the
+            # StrictUndefined object without forcing evaluation. Convert it to
+            # text only to trigger the intended UndefinedError immediately.
+            str(rendered)
     else:
-        rendered = _env.from_string(value).render(**context)
+        rendered = _compiled_template(value).render(**context)
     # Template quoting is YAML syntax only. Quote output style is controlled by
     # the operation quote/quote_styles metadata or by target-node preservation.
     return str(rendered) if isinstance(rendered, str) else rendered

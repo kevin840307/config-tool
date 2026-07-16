@@ -4,9 +4,10 @@ from copy import deepcopy
 from typing import Any
 
 from .engine import YamlPatchEngine
-from .comparison import strict_equal
+from .yamlio import clone
+from .comparison import strict_equal, strict_yaml_equal
 
-_VALUE_FIELDS = {"value", "values", "set", "merge", "replacement"}
+_VALUE_FIELDS = {"value", "values", "set", "merge", "search", "replacement", "match", "from", "after", "before", "position"}
 
 
 def _scalar_key(value: Any) -> tuple[type, Any] | None:
@@ -46,7 +47,21 @@ def _generalize_string(value: str, tokens: list[tuple[str, str]]) -> str:
     index = 0
     used = False
     while index < len(value):
-        matches = [(text, name) for text, name in tokens if value.startswith(text, index)]
+        matches = []
+        for text, name in tokens:
+            if not value.startswith(text, index):
+                continue
+            before = value[index - 1] if index > 0 else ''
+            after_index = index + len(text)
+            after = value[after_index] if after_index < len(value) else ''
+            # Avoid replacing tokens inside ordinary identifiers/words
+            # (e.g. env token 'stg' inside 'postgresql'). Hyphen, slash,
+            # dot, colon and other separators remain valid template boundaries.
+            if before and (before.isalnum() or before == '_'):
+                continue
+            if after and (after.isalnum() or after == '_'):
+                continue
+            matches.append((text, name))
         if not matches:
             result.append(value[index])
             index += 1
@@ -111,6 +126,20 @@ def generalize_operations(operations: list[dict[str, Any]], variables: dict[str,
     for raw in operations:
         op = deepcopy(raw)
         style_map: dict[str, str] = {}
+        # Diff compilation may minimize version changes to fragments such as
+        # search='06', replacement='12' for v506 -> v512. Promote those
+        # fragments back to full mapped values when each side has one unique
+        # variable candidate, so the patch can replay as v508 -> v520, etc.
+        if op.get('op') == 'replace_value' and isinstance(op.get('search'), str) and isinstance(op.get('replacement'), str):
+            search_fragment = op['search']
+            replacement_fragment = op['replacement']
+            search_vars = [(name, value) for name, value in variables.items()
+                           if isinstance(value, str) and search_fragment and search_fragment in value]
+            replacement_vars = [(name, value) for name, value in variables.items()
+                                if isinstance(value, str) and replacement_fragment and replacement_fragment in value]
+            if len(search_vars) == 1 and len(replacement_vars) == 1 and search_vars[0][0] != replacement_vars[0][0]:
+                op['search'] = '{{ ' + str(search_vars[0][0]) + ' }}'
+                op['replacement'] = '{{ ' + str(replacement_vars[0][0]) + ' }}'
         for field in _VALUE_FIELDS:
             if field in op:
                 original = deepcopy(op[field])
@@ -151,10 +180,10 @@ def _without_redundant_plain_quotes(config: dict[str, Any]) -> dict[str, Any]:
 
 def _replays(before: Any, after: Any, candidate: dict[str, Any], variables: dict[str, Any]) -> bool:
     try:
-        actual = YamlPatchEngine().apply_document(deepcopy(before), candidate, variables)
+        actual = YamlPatchEngine().apply_document(clone(before), candidate, variables, track_no_effect=False)
     except Exception:
         return False
-    return strict_equal(actual, after)
+    return strict_yaml_equal(actual, after)
 
 
 def verified_generalize_config(before: Any, after: Any, config: dict[str, Any], variables: dict[str, Any]) -> tuple[dict[str, Any], bool]:

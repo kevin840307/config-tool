@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 
 from jinja2 import Environment, StrictUndefined
 
-from yaml_config_engine.models import EngineConfig
+from yaml_config_engine.models import EngineConfig, apply_defaults_profile
 from yaml_config_engine.errors import ValidationError
 from yaml_config_engine.variable_scope import resolve_scope_variables
 from yaml_config_engine.yamlio import load_one
@@ -216,8 +216,35 @@ class XmlPatchEngine:
             operation_before = current
             skipped_before = len(skipped)
             context = {**context_vars, **captures, 'captures': captures}
-            spec = _render(deepcopy(raw), context)
+            spec = apply_defaults_profile(_render(deepcopy(raw), context), cfg.defaults_profile)
             op = spec['op']
+            if 'paths' in spec:
+                paths = spec.get('paths')
+                if not isinstance(paths, list) or not paths:
+                    raise XmlFormatError('paths must be a non-empty list')
+                seen: set[str] = set()
+                for pattern in paths:
+                    if not isinstance(pattern, str) or not pattern.strip():
+                        raise XmlFormatError('paths entries must be non-empty strings')
+                    if pattern in seen:
+                        continue
+                    seen.add(pattern)
+                    expanded = deepcopy(spec)
+                    expanded.pop('paths', None)
+                    expanded['path'] = pattern
+                    # A paths entry is explicitly multi-target; selector entries
+                    # apply to every matched XML node unless the user overrides it.
+                    expanded.setdefault('on_multiple_matches', 'all')
+                    try:
+                        current = self._apply_operation(current, expanded)
+                    except XmlFormatError as exc:
+                        policy = str(expanded.get('missing', 'skip')).lower()
+                        if policy == 'skip' and any(marker in str(exc).lower() for marker in ('no xml node matched','got 0','not found','no child')):
+                            skipped.append({'id': expanded.get('id'), 'op': op, 'path': pattern, 'reason': str(exc)})
+                            continue
+                        raise
+                applied.append(spec.get('id', op))
+                continue
             if op == 'capture':
                 root, _ = parse_xml_spans(current)
                 targets = select(current, root, spec.get('path', '/'))

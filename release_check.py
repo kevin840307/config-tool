@@ -27,12 +27,14 @@ def main() -> int:
     checks = [
         run("compileall", [sys.executable, "-m", "compileall", "-q", "."]),
         run("self-test", [sys.executable, "self_test.py"]),
+        run("same-fab-phase-version", [sys.executable, "tests/test_same_fab_phase_version_folder.py"]),
+        run("enterprise-helm-values", [sys.executable, "tests/test_enterprise_helm_values_auto.py"]),
         run("yaml-cli-help", [sys.executable, "yaml_config_tool.py", "--help"]),
         run("xml-cli-help", [sys.executable, "xml_config_tool.py", "--help"]),
         run("mixed-cli-help", [sys.executable, "config_tool.py", "--help"]),
     ]
     payload = {
-        "release": "0.10.0-rc1",
+        "release": "0.10.0-rc23",
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "checks": checks,

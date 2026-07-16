@@ -33,7 +33,7 @@ def main() -> int:
         started = time.perf_counter(); verify_result = tool.verify(before, patch, after); verify_s = time.perf_counter() - started
         operations = len(compile_result.data.get("config", {}).get("operations", []))
         payload = {
-            "release": "0.10.0-rc1",
+            "release": "0.10.0-rc15",
             "input_lines": len(before.read_text(encoding="utf-8").splitlines()),
             "compile_seconds": round(compile_s, 6),
             "apply_seconds": round(apply_s, 6),

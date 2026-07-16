@@ -81,3 +81,39 @@ def strict_documents_equal(actual: list[Any], expected: list[Any]) -> bool:
     if len(actual) != len(expected):
         return False
     return all(strict_equal(a, e) for a, e in zip(actual, expected))
+
+
+def _contains_merge_metadata(value: Any, seen: set[int] | None = None) -> bool:
+    seen = seen or set()
+    identity = id(value)
+    if identity in seen:
+        return False
+    seen.add(identity)
+    if getattr(value, 'merge', None):
+        return True
+    if isinstance(value, dict):
+        return any(_contains_merge_metadata(k, seen) or _contains_merge_metadata(v, seen) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_merge_metadata(v, seen) for v in value)
+    return False
+
+
+def strict_yaml_equal(actual: Any, expected: Any) -> bool:
+    """Strict YAML equality with correct merge-key semantics.
+
+    ruamel caches values inherited through ``<<``. Updating an anchor source does
+    not refresh those cached lookups until the YAML is serialized and parsed again.
+    Compiler replay must therefore normalize merge-key documents before comparing,
+    otherwise a correct anchor-only update is rejected and aliases are materialized.
+    """
+    if not (_contains_merge_metadata(actual) or _contains_merge_metadata(expected)):
+        return strict_equal(actual, expected)
+    from io import StringIO
+    from ruamel.yaml import YAML
+    yaml = YAML(typ='rt')
+    yaml.preserve_quotes = True
+    def normalize(value: Any) -> Any:
+        out = StringIO()
+        yaml.dump(value, out)
+        return yaml.load(out.getvalue())
+    return strict_equal(normalize(actual), normalize(expected))

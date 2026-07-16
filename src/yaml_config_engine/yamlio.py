@@ -116,5 +116,43 @@ def dumps(data: Any, output_options: Mapping[str, Any] | None = None) -> str:
     return out.getvalue()
 
 
+def _contains_yaml_merge(value: Any, seen: set[int] | None = None) -> bool:
+    """Return whether a round-trip YAML object contains ``<<`` merge metadata.
+
+    ``copy.deepcopy`` in current ruamel.yaml releases duplicates the anchor source
+    and the merge reference independently. Mutating the cloned anchor then leaves
+    consumers pointing at a stale copy and may materialize inherited keys on dump.
+    """
+    seen = seen or set()
+    identity = id(value)
+    if identity in seen:
+        return False
+    seen.add(identity)
+    merge = getattr(value, 'merge', None)
+    if merge:
+        return True
+    if isinstance(value, dict):
+        return any(_contains_yaml_merge(k, seen) or _contains_yaml_merge(v, seen) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_yaml_merge(v, seen) for v in value)
+    return False
+
+
 def clone(data: Any) -> Any:
-    return deepcopy(data)
+    """Clone YAML data while preserving anchors, aliases, comments and styles.
+
+    The common path remains ``deepcopy``. Documents using YAML merge keys use a
+    ruamel round trip because deepcopy breaks the anchor/merge object topology.
+    """
+    if not _contains_yaml_merge(data):
+        return deepcopy(data)
+    yaml = make_yaml()
+    out = StringIO()
+    if isinstance(data, list) and data and all(isinstance(v, dict) for v in data):
+        # A list can be either a YAML sequence or the document list used by the
+        # file engine. Keep it as a normal sequence here; callers cloning document
+        # collections clone each document explicitly.
+        yaml.dump(data, out)
+    else:
+        yaml.dump(data, out)
+    return yaml.load(out.getvalue())

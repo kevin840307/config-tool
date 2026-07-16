@@ -26,6 +26,10 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument('--layout', choices=['compact','expanded'], default='compact')
     c.add_argument('--matched-files-only', action='store_true', help='Generate auto config only for paths present in both before and after')
     c.add_argument('--exact-bytes', action='store_true', help='Require byte-identical output; may use readable text or Base64 fallback')
+    c.add_argument('--var', action='append', default=[], help='Explicit file-key variable NAME=VALUE')
+    c.add_argument('--variable-map-file', action='append', default=[], help='Use mapping values to parameterize generated file keys')
+    c.add_argument('--fab', default='', help='FAB scope used for file-key mapping')
+    c.add_argument('--env', default='', help='ENV scope used for file-key mapping')
     a = sub.add_parser('apply-folder', help='Apply one mixed YAML/XML patch.yaml')
     a.add_argument('source_root'); a.add_argument('generated_root'); a.add_argument('output_root')
     a.add_argument('--var', action='append', default=[])
@@ -41,7 +45,8 @@ def main(argv: list[str] | None = None) -> int:
                                        verify=not args.no_verify,
                                        layout=args.layout,
                                        matched_files_only=args.matched_files_only,
-                                       exact_bytes=args.exact_bytes)
+                                       exact_bytes=args.exact_bytes, variables=parse_vars(args.var),
+                                       variable_map_files=args.variable_map_file, fab=args.fab, env=args.env)
         print(json.dumps(result, ensure_ascii=False)); return 0 if result['verified'] else 2
     if args.cmd == 'apply-folder':
         result = engine.apply_folder(args.source_root, args.generated_root, args.output_root, parse_vars(args.var), args.variable_map_file)

@@ -2,7 +2,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from yaml_config_engine.models import omit_concise_defaults
 import xml.etree.ElementTree as ET
+import re
+import os
+import time
 
 from .engine import XmlPatchEngine
 
@@ -83,7 +87,8 @@ class XmlDiffCompiler:
             if _local(b.tag)!=_local(a.tag): raise ValueError('root element changed')
             ops=[]; self._diff(b,a,'/'+_local(b.tag),ops,warnings)
             ops=self._optimize_selectors(btxt,atxt,ops,warnings)
-            cfg={'version':1,'format':'xml','options':{'atomic_write':True},'operations':ops}
+            ops=omit_concise_defaults(ops)
+            cfg={'version':1,'defaults_profile':'concise-v1','format':'xml','options':{'atomic_write':True},'operations':ops}
             actual=XmlPatchEngine().apply_text(btxt,cfg)[0]
             if actual == atxt:
                 return XmlCompileResult(cfg,True,'structural-operations-exact',warnings)
@@ -94,94 +99,194 @@ class XmlDiffCompiler:
 
 
     @staticmethod
+    def _selector_candidates(paths: list[str]) -> list[str]:
+        """Return selector candidates in the required simplification order.
+
+        Prefer the shortest wildcard first. Full replay verification is the final
+        authority. Exact unions are only a fallback when a wildcard would also
+        modify unrelated sibling nodes.
+        """
+        parts = [path.strip('/').split('/') for path in paths]
+        if not parts or any(len(item) != len(parts[0]) for item in parts):
+            return []
+        varying = [pos for pos in range(len(parts[0])) if len({item[pos] for item in parts}) > 1]
+        if not varying:
+            return []
+        candidates: list[str] = []
+        wildcard = list(parts[0])
+        for pos in varying:
+            wildcard[pos] = '*'
+        candidates.append('/' + '/'.join(wildcard))
+
+        # Exact name union is deliberately second: it preserves a concise single
+        # operation when wildcard replay is too broad, without overriding the
+        # user's wildcard-first simplification preference.
+        if len(varying) == 1:
+            pos = varying[0]
+            values = []
+            for item in parts:
+                value = item[pos]
+                if value not in values:
+                    values.append(value)
+            if all(re.fullmatch(r'[A-Za-z_][\w:.-]*', value) for value in values):
+                union = list(parts[0])
+                union[pos] = '[' + ','.join(values) + ']'
+                union_path = '/' + '/'.join(union)
+                if union_path not in candidates:
+                    candidates.append(union_path)
+        return candidates
+
+    @staticmethod
+    def _verified_trial(before_text: str, after_text: str, operations: list[dict[str, Any]]) -> bool:
+        cfg = {'version': 1, 'defaults_profile': 'concise-v1', 'format': 'xml', 'options': {'atomic_write': True}, 'operations': operations}
+        try:
+            return XmlPatchEngine().apply_text(before_text, cfg)[0] == after_text
+        except Exception:
+            return False
+
+    @staticmethod
+    def _operation_fingerprint(value: Any) -> Any:
+        if isinstance(value, dict):
+            return ('dict', tuple((XmlDiffCompiler._operation_fingerprint(k), XmlDiffCompiler._operation_fingerprint(v)) for k, v in value.items()))
+        if isinstance(value, (list, tuple)):
+            return ('list', tuple(XmlDiffCompiler._operation_fingerprint(v) for v in value))
+        return ('scalar', type(value).__module__, type(value).__qualname__, repr(value))
+
+    @staticmethod
     def _optimize_selectors(before_text: str, after_text: str, operations: list[dict[str, Any]], warnings: list[str]) -> list[dict[str, Any]]:
         current = [dict(op) for op in operations]
+        timeout_seconds = float(os.getenv('CONFIG_TOOL_OPTIMIZATION_TIMEOUT_SECONDS', '5'))
+        max_candidates = int(os.getenv('CONFIG_TOOL_OPTIMIZATION_MAX_CANDIDATES', '2000'))
+        deadline = time.monotonic() + max(0.05, timeout_seconds)
+        candidate_count = 0
+        limit_reported = False
+        seen_states: set[Any] = set()
+        replay_cache: dict[Any, bool] = {}
 
-        # Extract identical newly-added child sections under sibling XML elements.
-        # The candidate is accepted only when the exact source-preserving XML output
-        # equals the requested target text.
-        insert_groups: dict[str, list[int]] = {}
-        for index, operation in enumerate(current):
-            if operation.get('op') != 'insert_key':
-                continue
-            path, key = operation.get('path'), operation.get('key')
-            if not isinstance(path, str) or not isinstance(key, str) or '*' in path:
-                continue
-            signature = repr({'key': key, 'value': operation.get('value')})
-            insert_groups.setdefault(signature, []).append(index)
-        for indices in insert_groups.values():
-            if len(indices) < 2:
-                continue
-            paths = [str(current[index]['path']).strip('/').split('/') for index in indices]
-            if not paths or any(len(parts) != len(paths[0]) for parts in paths):
-                continue
-            varying = [pos for pos in range(len(paths[0])) if len({parts[pos] for parts in paths}) > 1]
-            if not varying:
-                continue
-            parent = list(paths[0])
-            for pos in varying:
-                parent[pos] = '*'
-            key = str(current[indices[0]]['key'])
-            candidate_path = '/' + '/'.join(parent + [key])
-            merged = {
-                'op': 'set', 'path': candidate_path,
-                'value': current[indices[0]].get('value'),
-                'missing': 'create', 'on_multiple_matches': 'all',
-            }
-            removed = set(indices)
-            trial = [op for index, op in enumerate(current) if index not in removed]
-            trial.insert(min(indices), merged)
-            cfg = {'version': 1, 'format': 'xml', 'options': {'atomic_write': True}, 'operations': trial}
-            try:
-                actual = XmlPatchEngine().apply_text(before_text, cfg)[0]
-            except Exception:
-                continue
-            if actual == after_text:
-                current = trial
-                warnings.append(f'Extracted common XML child section {key!r} into wildcard path {candidate_path}.')
+        def budget_exhausted() -> bool:
+            nonlocal limit_reported
+            exhausted = time.monotonic() >= deadline or candidate_count >= max_candidates
+            if exhausted and not limit_reported:
+                reason = 'time budget' if time.monotonic() >= deadline else 'candidate limit'
+                warnings.append(f'XML config optimization stopped at the {reason}; kept the last replay-verified config (candidates={candidate_count}, limit={max_candidates}, timeout={timeout_seconds:g}s).')
+                limit_reported = True
+            return exhausted
+
+        def checked_trial(trial: list[dict[str, Any]]) -> bool:
+            nonlocal candidate_count
+            key = XmlDiffCompiler._operation_fingerprint(trial)
+            if key in replay_cache:
+                return replay_cache[key]
+            if budget_exhausted():
+                return False
+            candidate_count += 1
+            verified = XmlDiffCompiler._verified_trial(before_text, after_text, trial)
+            replay_cache[key] = verified
+            return verified
+
+        # Fixed-point optimization is required because one exact path merge can
+        # expose a second parent-level merge. Operations with different semantic
+        # fields are never grouped; they remain as independent residual entries.
+        for _round in range(8):
+            if budget_exhausted():
                 break
-
-        changed = True
-        while changed:
+            state = XmlDiffCompiler._operation_fingerprint(current)
+            if state in seen_states:
+                warnings.append(f'XML config optimization stopped because a repeated state was detected at round {_round + 1}.')
+                break
+            seen_states.add(state)
             changed = False
+
+            # Identical inserted child sections under related parents.
+            insert_groups: dict[str, list[int]] = {}
+            for index, operation in enumerate(current):
+                if operation.get('op') != 'insert_key':
+                    continue
+                path, key = operation.get('path'), operation.get('key')
+                if not isinstance(path, str) or not isinstance(key, str) or '*' in path or '/[' in path:
+                    continue
+                signature = dict(operation)
+                signature.pop('path', None); signature.pop('id', None)
+                insert_groups.setdefault(repr(signature), []).append(index)
+            for indices in insert_groups.values():
+                if len(indices) < 2:
+                    continue
+                parent_paths = [str(current[index]['path']) for index in indices]
+                key = str(current[indices[0]]['key'])
+                for parent_selector in XmlDiffCompiler._selector_candidates(parent_paths):
+                    candidate_path = parent_selector.rstrip('/') + '/' + key
+                    merged = {
+                        'op': 'set', 'path': candidate_path,
+                        'value': current[indices[0]].get('value'),
+                        'missing': 'create', 'on_multiple_matches': 'all',
+                    }
+                    removed = set(indices)
+                    trial = [dict(op) for index, op in enumerate(current) if index not in removed]
+                    trial.insert(min(indices), merged)
+                    if checked_trial(trial):
+                        current = trial
+                        changed = True
+                        warnings.append(f'Extracted {len(indices)} identical XML child additions into {candidate_path}.')
+                        break
+                if changed:
+                    break
+            if changed:
+                continue
+
+            # Same operation semantics, only path differs. This handles set,
+            # replace, replace_value and remove while preserving all non-path
+            # options such as missing, search/count and match expectations.
             groups: dict[str, list[int]] = {}
             for index, operation in enumerate(current):
-                if operation.get('op') not in {'set','replace','replace_value','remove'}:
+                if operation.get('op') not in {'set', 'replace', 'replace_value', 'remove'}:
                     continue
                 path = operation.get('path')
-                if not isinstance(path, str) or '*' in path:
+                if not isinstance(path, str) or '*' in path or '/[' in path:
                     continue
-                signature = dict(operation); signature.pop('path', None); signature.pop('id', None)
+                signature = dict(operation)
+                signature.pop('path', None); signature.pop('id', None)
                 groups.setdefault(repr(signature), []).append(index)
             for indices in groups.values():
                 if len(indices) < 2:
                     continue
-                paths = [str(current[index]['path']).strip('/').split('/') for index in indices]
-                if not paths or any(len(parts) != len(paths[0]) for parts in paths):
-                    continue
-                varying = [pos for pos in range(len(paths[0])) if len({parts[pos] for parts in paths}) > 1]
-                if not varying:
-                    continue
-                candidate = list(paths[0])
-                for pos in varying:
-                    candidate[pos] = '*'
-                candidate_path = '/' + '/'.join(candidate)
-                merged = dict(current[indices[0]])
-                merged['path'] = candidate_path
-                merged['on_multiple_matches'] = 'all'
+                paths = [str(current[index]['path']) for index in indices]
                 removed = set(indices)
-                trial = [op for index, op in enumerate(current) if index not in removed]
-                trial.insert(min(indices), merged)
-                cfg={'version':1,'format':'xml','options':{'atomic_write':True},'operations':trial}
-                try:
-                    actual=XmlPatchEngine().apply_text(before_text,cfg)[0]
-                except Exception:
-                    continue
-                if actual == after_text:
-                    current=trial
-                    changed=True
-                    warnings.append(f'Optimized {len(indices)} identical XML operations into wildcard path {candidate_path}.')
+                candidates = XmlDiffCompiler._selector_candidates(paths)
+                wildcard = next((candidate for candidate in candidates if '*' in candidate), None)
+                union = next((candidate for candidate in candidates if '/[' in candidate), None)
+                if wildcard is not None:
+                    merged = dict(current[indices[0]])
+                    merged['path'] = wildcard
+                    merged.pop('paths', None)
+                    merged['on_multiple_matches'] = 'all'
+                    trial = [dict(op) for index, op in enumerate(current) if index not in removed]
+                    trial.insert(min(indices), merged)
+                    if checked_trial(trial):
+                        current = trial; changed = True
+                        warnings.append(f'Optimized {len(indices)} identical XML operations into wildcard path {wildcard}.')
+                if not changed:
+                    merged = dict(current[indices[0]])
+                    merged.pop('path', None)
+                    merged['paths'] = list(dict.fromkeys(paths))
+                    trial = [dict(op) for index, op in enumerate(current) if index not in removed]
+                    trial.insert(min(indices), merged)
+                    if checked_trial(trial):
+                        current = trial; changed = True
+                        warnings.append(f'Optimized {len(indices)} identical XML operations into one paths operation.')
+                if not changed and union is not None:
+                    merged = dict(current[indices[0]])
+                    merged['path'] = union
+                    merged.pop('paths', None)
+                    merged['on_multiple_matches'] = 'all'
+                    trial = [dict(op) for index, op in enumerate(current) if index not in removed]
+                    trial.insert(min(indices), merged)
+                    if checked_trial(trial):
+                        current = trial; changed = True
+                        warnings.append(f'Optimized {len(indices)} identical XML operations into exact union path {union}.')
+                if changed:
                     break
+            if not changed:
+                break
         return current
 
     def _diff(self,b:ET.Element,a:ET.Element,path:str,ops:list[dict[str,Any]],warnings:list[str]):

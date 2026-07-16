@@ -1,0 +1,42 @@
+{
+  "release": "0.10.0-rc23",
+  "python": "3.13.5",
+  "platform": "Linux-4.4.0-x86_64-with-glibc2.41",
+  "checks": [
+    {
+      "name": "compileall",
+      "returncode": 0
+    },
+    {
+      "name": "self-test",
+      "returncode": 0
+    },
+    {
+      "name": "same-fab-phase-version",
+      "returncode": 0
+    },
+    {
+      "name": "enterprise-helm-values",
+      "returncode": 0
+    },
+    {
+      "name": "yaml-cli-help",
+      "returncode": 0
+    },
+    {
+      "name": "xml-cli-help",
+      "returncode": 0
+    },
+    {
+      "name": "mixed-cli-help",
+      "returncode": 0
+    },
+    {
+      "name": "combined-release-check-wrapper",
+      "returncode": 124,
+      "note": "wrapper exceeded container 10-minute execution limit; component checks passed separately"
+    }
+  ],
+  "passed_components": true,
+  "combined_wrapper_completed": false
+}

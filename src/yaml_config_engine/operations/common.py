@@ -408,6 +408,16 @@ def op_insert(ctx: OperationContext, spec: dict[str, Any]) -> Any:
         seq.insert(idx, value); idx += 1
     return ctx.document
 
+def _nested_references_original(value: Any) -> bool:
+    if isinstance(value, str):
+        return ("{{" in value or "{%" in value) and "original" in value
+    if isinstance(value, dict):
+        return any(_nested_references_original(k) or _nested_references_original(v) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_nested_references_original(v) for v in value)
+    return False
+
+
 @registry.register("update_item", "upsert_item")
 def op_update_item(ctx: OperationContext, spec: dict[str, Any]) -> Any:
     path = spec["path"]
@@ -449,7 +459,8 @@ def op_update_item(ctx: OperationContext, spec: dict[str, Any]) -> Any:
         # compiler update deep mappings/lists without replacing the whole
         # subtree, preserving comments, anchors, quoting, and unaffected style.
         if spec.get("item_operations"):
-            nested = OperationContext(document=item, original=deepcopy(item), variables=ctx.variables, captures=ctx.captures, skipped_operations=ctx.skipped_operations)
+            nested_original = deepcopy(item) if _nested_references_original(spec["item_operations"]) else item
+            nested = OperationContext(document=item, original=nested_original, variables=ctx.variables, captures=ctx.captures, skipped_operations=ctx.skipped_operations)
             for nested_spec in spec["item_operations"]:
                 if not isinstance(nested_spec, dict) or "op" not in nested_spec:
                     raise OperationError("update_item.item_operations entries require op")

@@ -260,11 +260,30 @@ def _descendants(node: XmlNode) -> Iterable[XmlNode]:
         yield from _descendants(child)
 
 
-def _parse_segment(segment: str) -> tuple[str, str | None]:
-    m = re.fullmatch(rf"({_NAME}|\*)(?:\[(.*)\])?", segment.strip())
+def _parse_segment(segment: str) -> tuple[str | tuple[str, ...], str | None]:
+    raw = segment.strip()
+    # Exact XML child-name union. This intentionally uses the same readable
+    # syntax as the YAML selector engine: /root/[p1,p2]/value. A segment that
+    # starts with '[' is unambiguously a name union, while tag[predicate]
+    # remains the existing predicate syntax.
+    if raw.startswith('[') and raw.endswith(']'):
+        names = tuple(part.strip() for part in raw[1:-1].split(',') if part.strip())
+        if len(names) < 2 or any(re.fullmatch(_NAME, name) is None for name in names):
+            raise XmlFormatError(f"Unsupported XML name union: {segment!r}")
+        if len(set(names)) != len(names):
+            raise XmlFormatError(f"Duplicate XML name in union: {segment!r}")
+        return names, None
+    m = re.fullmatch(rf"({_NAME}|\*)(?:\[(.*)\])?", raw)
     if not m:
         raise XmlFormatError(f"Unsupported XML path segment: {segment!r}")
     return m.group(1), m.group(2)
+
+
+def _children_for_segment(node: XmlNode, name: str | tuple[str, ...]) -> list[XmlNode]:
+    if isinstance(name, tuple):
+        allowed = set(name)
+        return [child for child in node.children if child.name in allowed]
+    return node.direct_children(name)
 
 
 def _filter_predicate(text: str, nodes: list[XmlNode], predicate: str | None) -> list[XmlNode]:
@@ -299,20 +318,20 @@ def select(text: str, root: XmlNode, path: str) -> list[XmlTarget]:
     first_name, first_pred = _parse_segment(parts[0]) if parts else ('*', None)
     if descendant:
         candidates = [root, *_descendants(root)]
-        current = _filter_predicate(text, [n for n in candidates if first_name == '*' or n.name == first_name], first_pred)
+        current = _filter_predicate(text, [n for n in candidates if first_name == '*' or (isinstance(first_name, tuple) and n.name in first_name) or n.name == first_name], first_pred)
         parts = parts[1:]
     else:
-        if first_name == '*' or root.name == first_name:
+        if first_name == '*' or root.name == first_name or (isinstance(first_name, tuple) and root.name in first_name):
             current = _filter_predicate(text, [root], first_pred)
             parts = parts[1:]
         else:
-            current = _filter_predicate(text, root.direct_children(first_name), first_pred)
+            current = _filter_predicate(text, _children_for_segment(root, first_name), first_pred)
             parts = parts[1:]
     for part in parts:
         name, pred = _parse_segment(part)
         nxt: list[XmlNode] = []
         for n in current:
-            nxt.extend(_filter_predicate(text, n.direct_children(name), pred))
+            nxt.extend(_filter_predicate(text, _children_for_segment(n, name), pred))
         current = nxt
     if terminal is None:
         return [XmlTarget('element', n) for n in current]

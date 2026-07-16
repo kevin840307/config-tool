@@ -16,7 +16,10 @@ from .models import EngineConfig
 from .yamlio import load_all, load_one, dump_one, dump_all
 from .comparison import strict_documents_equal
 from .variable_scope import resolve_scope_variables
+from folder_path_resolver import resolve_file_keys
+from file_key_generalizer import generalize_file_map, load_compile_path_context
 from .config_loader import load_config_with_variable_maps
+from .mapping_generalizer import verified_generalize_config, generalize_operations
 
 YAML_SUFFIXES = {'.yaml', '.yml'}
 
@@ -131,7 +134,7 @@ class FolderCompiler:
             return {'id': f'compact-{index}', 'op': name, **value}
         raise ValueError(f'Unsupported compact operation at index {index}: {name}')
 
-    def _write_compact_patch(self, output_root: Path, entries: list[FolderEntry]) -> Path:
+    def _write_compact_patch(self, output_root: Path, entries: list[FolderEntry], *, source_root: Path, path_variables: dict[str, Any] | None = None, variable_map: dict[str, dict[str, Any]] | None = None) -> Path:
         files: dict[str, Any] = {}
         for entry in entries:
             if entry.action == 'unchanged':
@@ -156,8 +159,6 @@ class FolderCompiler:
                     item['replace_bytes_base64'] = cfg['yaml_exact_bytes_base64']
                 else:
                     item['replace_documents'] = operations[0].get('value', []) if operations else []
-                if entry.warnings:
-                    item['warnings'] = entry.warnings
                 files[entry.relative_path] = item
             else:
                 # Compact output is assembled from the exact per-file config
@@ -167,9 +168,8 @@ class FolderCompiler:
                 item: dict[str, Any] = {'config': cfg}
                 if entry.strategy:
                     item['strategy'] = entry.strategy
-                if entry.warnings:
-                    item['warnings'] = entry.warnings
                 files[entry.relative_path] = item
+        files, generalization = generalize_file_map(files, source_root, variables=path_variables)
         compact = {
             'version': 1,
             'kind': 'yaml-folder-patch-compact',
@@ -201,43 +201,50 @@ class FolderCompiler:
         if output_root.exists():
             shutil.rmtree(output_root)
         shutil.copytree(source_root, output_root)
-        for rel_text, spec in (patch.get('files') or {}).items():
-            target = output_root / Path(rel_text)
-            if spec.get('delete') is True:
-                if target.exists():
-                    target.unlink()
-                continue
-            if 'create_bytes_base64' in spec or 'replace_bytes_base64' in spec:
-                encoded = spec.get('create_bytes_base64', spec.get('replace_bytes_base64'))
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(base64.b64decode(encoded))
-                continue
-            if 'create_documents' in spec or 'replace_documents' in spec:
-                docs = spec.get('create_documents', spec.get('replace_documents'))
-                target.parent.mkdir(parents=True, exist_ok=True)
-                dump_all(docs, target)
-                continue
-            parts = Path(rel_text).parts
-            fab = parts[0] if len(parts) >= 3 else ''
-            env = parts[1] if len(parts) >= 3 else ''
-            scope_vars, _ = resolve_scope_variables(patch.get('variable_map', {}), fab, env)
-            merged_vars = dict(patch.get('variables') or {})
-            merged_vars.update(scope_vars)
-            merged_vars.update(variables or {})
-            if 'config' in spec:
-                cfg = dict(spec.get('config') or {})
-            else:
-                # Backward compatibility for compact patches produced before
-                # per-file config composition was introduced.
-                operations = [self._expand_compact_operation(op, i) for i, op in enumerate(spec.get('ops', []), 1)]
-                cfg = {
-                    'version': 1,
-                    'options': patch.get('options') or {'atomic_write': True},
-                    'variables': patch.get('variables') or {},
-                    'variable_map': patch.get('variable_map') or {},
-                    'operations': operations,
-                }
-            self.engine.apply_file(target, cfg, target, merged_vars)
+        claimed_targets: dict[str, str] = {}
+        for raw_rel_text, spec in (patch.get('files') or {}).items():
+            rel_targets = resolve_file_keys(output_root, str(raw_rel_text), patch, variables)
+            for rel_text in rel_targets:
+                previous = claimed_targets.get(rel_text)
+                if previous is not None:
+                    raise ValueError(f'Folder patch file patterns overlap at {rel_text}: {previous!r} and {raw_rel_text!r}')
+                claimed_targets[rel_text] = str(raw_rel_text)
+                target = output_root / Path(rel_text)
+                if spec.get('delete') is True:
+                    if target.exists():
+                        target.unlink()
+                    continue
+                if 'create_bytes_base64' in spec or 'replace_bytes_base64' in spec:
+                    encoded = spec.get('create_bytes_base64', spec.get('replace_bytes_base64'))
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(base64.b64decode(encoded))
+                    continue
+                if 'create_documents' in spec or 'replace_documents' in spec:
+                    docs = spec.get('create_documents', spec.get('replace_documents'))
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    dump_all(docs, target)
+                    continue
+                parts = Path(rel_text).parts
+                fab = parts[0] if len(parts) >= 3 else ''
+                env = parts[1] if len(parts) >= 3 else ''
+                scope_vars, _ = resolve_scope_variables(patch.get('variable_map', {}), fab, env)
+                merged_vars = dict(patch.get('variables') or {})
+                merged_vars.update(scope_vars)
+                merged_vars.update(variables or {})
+                if 'config' in spec:
+                    cfg = dict(spec.get('config') or {})
+                else:
+                    # Backward compatibility for compact patches produced before
+                    # per-file config composition was introduced.
+                    operations = [self._expand_compact_operation(op, i) for i, op in enumerate(spec.get('ops', []), 1)]
+                    cfg = {
+                        'version': 1,
+                        'options': patch.get('options') or {'atomic_write': True},
+                        'variables': patch.get('variables') or {},
+                        'variable_map': patch.get('variable_map') or {},
+                        'operations': operations,
+                    }
+                self.engine.apply_file(target, cfg, target, merged_vars)
 
     def compile_folder(
         self,
@@ -255,8 +262,13 @@ class FolderCompiler:
         layout: str = 'compact',
         matched_files_only: bool = False,
         exact_bytes: bool = False,
+        variables: dict[str, Any] | None = None,
+        variable_map_files: list[str | Path] | None = None,
+        fab: str = '',
+        env: str = '',
     ) -> FolderCompileResult:
         before_root = Path(before_root).resolve()
+        path_variables, compiled_variable_map = load_compile_path_context(variable_map_files, variables, fab, env)
         after_root = Path(after_root).resolve()
         output_root = Path(output_root).resolve()
         include = include or ['**/*.yaml', '**/*.yml', '*.yaml', '*.yml']
@@ -288,6 +300,8 @@ class FolderCompiler:
                     'folder_action': 'create_file',
                     'document_mode': 'all',
                 }
+                if path_variables:
+                    cfg['operations'] = generalize_operations(cfg['operations'], path_variables)
                 if exact_bytes:
                     cfg['yaml_exact_bytes_base64'] = base64.b64encode(b.read_bytes()).decode('ascii')
                 cfg_path = output_root / cfg_rel
@@ -315,6 +329,19 @@ class FolderCompiler:
                 strategy = compiled.strategy
                 verified_one = compiled.verified
                 warnings = list(compiled.warnings)
+                # Folder auto-compile must generalize content values too, not
+                # only file keys. Mapping values remain external; patch.yaml
+                # stores templates such as {{ ver }} without embedding values.
+                if path_variables:
+                    generalized_cfg, accepted = verified_generalize_config(a_docs[0], b_docs[0], cfg, path_variables)
+                    if accepted:
+                        cfg = generalized_cfg
+                        cfg.pop('variables', None)
+                        cfg.pop('variable_map', None)
+                        cfg.pop('variable_map_file', None)
+                        cfg.pop('scope', None)
+                    else:
+                        warnings.append('Variable mapping generalization failed strict replay and was rolled back.')
                 # Folder compilation must preserve the single-file compiler result.
                 # Byte-for-byte equality is optional because comments, quote style,
                 # trailing newlines, or harmless formatting differences must not
@@ -323,7 +350,7 @@ class FolderCompiler:
                     candidate = Path(tmp) / a.name
                     shutil.copy2(a, candidate)
                     try:
-                        self.engine.apply_file(candidate, cfg, candidate)
+                        self.engine.apply_file(candidate, cfg, candidate, path_variables or {})
                         exact_match = candidate.read_bytes() == b.read_bytes()
                     except Exception as exc:
                         exact_match = False
@@ -354,6 +381,8 @@ class FolderCompiler:
                     'folder_action': 'replace_all_documents',
                     'document_mode': 'all',
                 }
+                if path_variables:
+                    cfg['operations'] = generalize_operations(cfg['operations'], path_variables)
                 if exact_bytes:
                     cfg['yaml_exact_bytes_base64'] = base64.b64encode(b.read_bytes()).decode('ascii')
                 strategy = 'replace-all-documents'
@@ -362,18 +391,28 @@ class FolderCompiler:
             dump_one(cfg, cfg_path)
             entries.append(FolderEntry(rel, 'patch', cfg_rel, strategy, verified_one, warnings))
 
+        manifest_files = []
+        for entry in entries:
+            row = asdict(entry)
+            row.pop('warnings', None)
+            manifest_files.append(row)
         manifest = {
             'version': 1,
             'kind': 'yaml-folder-patch',
             'source_root': str(before_root),
             'expected_root': str(after_root),
             'filters': {'include': include, 'exclude': exclude, 'path_allow': path_allow or [], 'path_deny': path_deny or [], 'fab_allow_prefix': fab_allow_prefix or [], 'fab_deny_prefix': fab_deny_prefix or [], 'env_allow': env_allow or [], 'env_deny': env_deny or []},
-            'files': [asdict(x) for x in entries],
+            'files': manifest_files,
         }
+        log_lines = []
+        for entry in entries:
+            for warning in entry.warnings or []:
+                log_lines.append(f'WARNING [{entry.relative_path}] {warning}')
+        (output_root / 'log.txt').write_text(('\n'.join(log_lines) + ('\n' if log_lines else '')), encoding='utf-8')
         manifest_path = output_root / 'manifest.yaml'
         dump_one(manifest, manifest_path)
-        compact_path = self._write_compact_patch(output_root, entries)
-        verified_all = self.verify_manifest(before_root, output_root, after_root) if verify else all(x.verified for x in entries)
+        compact_path = self._write_compact_patch(output_root, entries, source_root=before_root, path_variables=path_variables, variable_map=compiled_variable_map)
+        verified_all = self.verify_manifest(before_root, output_root, after_root, variables=path_variables, variable_map_files=variable_map_files) if verify else all(x.verified for x in entries)
         manifest['verified'] = verified_all
         dump_one(manifest, manifest_path)
         if layout == 'compact':
@@ -617,11 +656,14 @@ class FolderCompiler:
         source_root: str | Path,
         generated_root: str | Path,
         expected_root: str | Path,
+        *,
+        variables: dict[str, Any] | None = None,
+        variable_map_files: list[str | Path] | None = None,
     ) -> bool:
         expected_root = Path(expected_root).resolve()
         with TemporaryDirectory(prefix='yaml-folder-verify-') as tmp:
             actual_root = Path(tmp) / 'actual'
-            self.apply_manifest(source_root, generated_root, actual_root)
+            self.apply_manifest(source_root, generated_root, actual_root, variables=variables, variable_map_files=variable_map_files)
             generated_path = Path(generated_root)
             manifest_path = generated_path / 'manifest.yaml' if generated_path.is_dir() else None
             if manifest_path is not None and manifest_path.exists():

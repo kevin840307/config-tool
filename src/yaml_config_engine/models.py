@@ -64,9 +64,68 @@ def normalize_operation(raw: dict[str, Any]) -> dict[str, Any]:
     return op
 
 
+def apply_defaults_profile(value: Any, profile: str | None) -> Any:
+    """Expand opt-in concise defaults recursively without changing legacy configs."""
+    if profile != 'concise-v1':
+        return value
+    if isinstance(value, list):
+        return [apply_defaults_profile(item, profile) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {key: apply_defaults_profile(child, profile) for key, child in value.items()}
+    name = result.get('op')
+    if name in {'replace_value', 'replace_text_value'}:
+        result.setdefault('count', 1)
+        result.setdefault('expect_replacements', 1)
+    # Direct selector operations intentionally target every expanded node. This
+    # profile default is opt-in, so legacy patches retain strict multi-match errors.
+    direct_ops = {'set','replace','remove','merge','rename_key','insert_key','copy_key','move_key','replace_value','replace_text_value'}
+    path = result.get('path')
+    has_selector = isinstance(path, str) and any(token in path for token in ('*', '[', ']'))
+    if name in direct_ops and ('paths' in result or has_selector):
+        result.setdefault('on_multiple_matches', 'all')
+    return result
+
+
+def omit_concise_defaults(value: Any) -> Any:
+    """Remove fields implied by concise-v1 while preserving semantic exceptions."""
+    if isinstance(value, list):
+        return [omit_concise_defaults(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {key: omit_concise_defaults(child) for key, child in value.items()}
+    name = result.get('op')
+    if name in {'replace_value', 'replace_text_value'}:
+        if result.get('count') == 1:
+            result.pop('count', None)
+        if result.get('expect_replacements') == 1:
+            result.pop('expect_replacements', None)
+    if result.get('on_multiple_matches') == 'all':
+        direct_ops = {'set','replace','remove','merge','rename_key','insert_key','copy_key','move_key','replace_value','replace_text_value'}
+        match = result.get('match')
+        simple_unique_match = (
+            name in {'update_item','upsert_item','remove_item'}
+            and isinstance(match, dict)
+            and 'any' not in match
+            and int(result.get('expect_matches', 1)) == 1
+        )
+        source = result.get('source')
+        simple_unique_source = (
+            name == 'copy_item'
+            and isinstance(source, dict)
+            and isinstance(source.get('match'), dict)
+            and 'any' not in source.get('match', {})
+            and int(source.get('expect_matches', 1)) == 1
+        )
+        if name in direct_ops or simple_unique_match or simple_unique_source:
+            result.pop('on_multiple_matches', None)
+    return result
+
+
 class EngineConfig(BaseModel):
     model_config = ConfigDict(extra='allow')
     version: int = 1
+    defaults_profile: str | None = None
     variables: dict[str, Any] = Field(default_factory=dict)
     variable_map: dict[str, dict[str, Any]] | list[dict[str, Any]] = Field(default_factory=dict)
     variable_map_file: str | list[str] | None = None
@@ -101,7 +160,16 @@ class EngineConfig(BaseModel):
                 raise ValueError(f'operations[{index}] is missing op')
             if name not in SUPPORTED_OPS:
                 raise ValueError(f'operations[{index}] unsupported op: {name}')
-            if name not in {'capture'} and name not in {'copy_node','move_node','copy_item_to_node'} and 'path' not in op:
+            has_path = 'path' in op
+            has_paths = 'paths' in op
+            if has_path and has_paths:
+                raise ValueError(f'operations[{index}] must use either path or paths, not both')
+            if has_paths:
+                if not isinstance(op['paths'], list) or not op['paths'] or not all(isinstance(item, str) and item.strip() for item in op['paths']):
+                    raise ValueError(f'operations[{index}].paths must be a non-empty list of path strings')
+                # Preserve order while removing exact duplicate entries.
+                op['paths'] = list(dict.fromkeys(op['paths']))
+            if name not in {'capture'} and name not in {'copy_node','move_node','copy_item_to_node'} and not has_path and not has_paths:
                 op['path'] = '$'
             if name in {'insert','append','prepend','insert_at','insert_before','insert_after'} and 'value' not in op and 'values' not in op:
                 raise ValueError(f'operations[{index}] {name} requires value or values')

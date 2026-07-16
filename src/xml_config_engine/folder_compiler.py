@@ -9,6 +9,8 @@ from typing import Any
 from yaml_config_engine.yamlio import dump_one, load_one
 from yaml_config_engine.config_loader import load_config_with_variable_maps
 from yaml_config_engine.variable_scope import resolve_scope_variables
+from folder_path_resolver import resolve_file_keys
+from file_key_generalizer import generalize_file_map, load_compile_path_context
 from .compiler import XmlDiffCompiler
 from .engine import XmlPatchEngine
 
@@ -46,7 +48,7 @@ class XmlFolderCompiler:
         parts = Path(relative_path).parts
         return (parts[0], parts[1]) if len(parts) >= 3 else ('', '')
 
-    def _write_compact(self, out: Path, entries: list[dict[str, Any]]) -> Path:
+    def _write_compact(self, out: Path, entries: list[dict[str, Any]], *, source_root: Path, path_variables: dict[str, Any] | None = None, variable_map: dict[str, dict[str, Any]] | None = None) -> Path:
         files: dict[str, Any] = {}
         for entry in entries:
             action = entry['action']
@@ -65,8 +67,8 @@ class XmlFolderCompiler:
                 files[rel] = {
                     'config': cfg,
                     'strategy': entry.get('strategy'),
-                    'warnings': entry.get('warnings') or [],
                 }
+        files, generalization = generalize_file_map(files, source_root, variables=path_variables)
         patch = {
             'version': 1,
             'kind': 'xml-folder-patch-compact',
@@ -77,10 +79,11 @@ class XmlFolderCompiler:
         dump_one(patch, path)
         return path
 
-    def compile_folder(self, before_root, after_root, output_root, include_unchanged=False, verify=True, layout='compact', matched_files_only=False):
+    def compile_folder(self, before_root, after_root, output_root, include_unchanged=False, verify=True, layout='compact', matched_files_only=False, variables=None, variable_map_files=None, fab='', env=''):
         if layout not in {'compact', 'expanded'}:
             raise ValueError("layout must be 'compact' or 'expanded'")
         b = Path(before_root).resolve(); a = Path(after_root).resolve(); out = Path(output_root).resolve()
+        path_variables, compiled_variable_map = load_compile_path_context(variable_map_files, variables, fab, env)
         if out.exists(): shutil.rmtree(out)
         out.mkdir(parents=True)
         rels = sorted({p.relative_to(b) for p in b.rglob('*.xml')} | {p.relative_to(a) for p in a.rglob('*.xml')})
@@ -111,13 +114,21 @@ class XmlFolderCompiler:
                 ok = XmlDiffCompiler._structural_equal(actual, ap.read_text(encoding='utf-8-sig'))
             all_ok &= ok
             entries.append({'relative_path': rel.as_posix(), 'action': 'patch', 'config': cfgrel.as_posix(), 'verified': ok, 'strategy': r.strategy, 'warnings': r.warnings})
+        manifest_entries = []
+        log_lines = []
+        for entry in entries:
+            clean = dict(entry)
+            for warning in clean.pop('warnings', []) or []:
+                log_lines.append(f"WARNING [{entry.get('relative_path','')}] {warning}")
+            manifest_entries.append(clean)
         manifest = {
             'version': 1, 'kind': 'xml-folder-manifest', 'before_root': str(b), 'after_root': str(a),
-            'entries': entries, 'verified': all_ok,
+            'entries': manifest_entries, 'verified': all_ok,
             'counts': {k: sum(1 for e in entries if e['action'] == k) for k in ('patch', 'create', 'delete', 'unchanged')},
         }
+        (out / 'log.txt').write_text(('\n'.join(log_lines) + ('\n' if log_lines else '')), encoding='utf-8')
         mp = out / 'manifest.yaml'; dump_one(manifest, mp)
-        compact = self._write_compact(out, entries)
+        compact = self._write_compact(out, entries, source_root=b, path_variables=path_variables, variable_map=compiled_variable_map)
         if layout == 'compact':
             for name in ('configs', 'created'):
                 d = out / name
@@ -133,28 +144,34 @@ class XmlFolderCompiler:
         if out.exists(): shutil.rmtree(out)
         shutil.copytree(src, out)
         report = []
-        for rel, spec in (patch.get('files') or {}).items():
-            target = out / rel
-            if spec.get('delete') is True:
-                if target.exists(): target.unlink()
-                action = 'delete'
-            elif 'create_bytes_base64' in spec:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(base64.b64decode(spec['create_bytes_base64']))
-                action = 'create'
-            elif 'create_text' in spec:
-                # Backward compatibility with compact patches generated before
-                # exact-byte payloads were introduced.
-                self._write_text_spec(target, spec)
-                action = 'create'
-            else:
-                fab, env = self._scope_for(rel)
-                scope_vars, _ = resolve_scope_variables(patch.get('variable_map', {}), fab, env)
-                merged = dict(patch.get('variables') or {}); merged.update(scope_vars); merged.update(variables or {})
-                cfg = dict(spec.get('config') or {})
-                XmlPatchEngine().apply_file(target, cfg, target, merged)
-                action = 'patch'
-            report.append({'relative_path': rel, 'action': action})
+        claimed_targets: dict[str, str] = {}
+        for raw_rel, spec in (patch.get('files') or {}).items():
+            for rel in resolve_file_keys(out, str(raw_rel), patch, variables):
+                previous = claimed_targets.get(rel)
+                if previous is not None:
+                    raise ValueError(f'Folder patch file patterns overlap at {rel}: {previous!r} and {raw_rel!r}')
+                claimed_targets[rel] = str(raw_rel)
+                target = out / rel
+                if spec.get('delete') is True:
+                    if target.exists(): target.unlink()
+                    action = 'delete'
+                elif 'create_bytes_base64' in spec:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(base64.b64decode(spec['create_bytes_base64']))
+                    action = 'create'
+                elif 'create_text' in spec:
+                    # Backward compatibility with compact patches generated before
+                    # exact-byte payloads were introduced.
+                    self._write_text_spec(target, spec)
+                    action = 'create'
+                else:
+                    fab, env = self._scope_for(rel)
+                    scope_vars, _ = resolve_scope_variables(patch.get('variable_map', {}), fab, env)
+                    merged = dict(patch.get('variables') or {}); merged.update(scope_vars); merged.update(variables or {})
+                    cfg = dict(spec.get('config') or {})
+                    XmlPatchEngine().apply_file(target, cfg, target, merged)
+                    action = 'patch'
+                report.append({'relative_path': rel, 'action': action})
         counts = {k: sum(1 for e in report if e['action'] == k) for k in ('patch', 'create', 'delete')}
         return {'version': 1, 'kind': 'xml-folder-apply', 'output_root': str(out), 'files': report, 'counts': counts}
 

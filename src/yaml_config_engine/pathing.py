@@ -1,5 +1,6 @@
 from __future__ import annotations
 import re
+from functools import lru_cache
 from typing import Any
 
 UnionToken = tuple[str, ...]
@@ -8,15 +9,16 @@ from .errors import PathError
 _TOKEN_RE = re.compile(r"(?:^|\.)([^.\[\]]+)|\[(\-?\d+|\*)\]")
 
 
-def parse_path(path: str) -> list[str | int | UnionToken]:
+@lru_cache(maxsize=8192)
+def _parse_path_cached(path: str) -> tuple[str | int | UnionToken, ...]:
     if path in ("$", "", None):
-        return []
+        return ()
     if path.startswith("$/"):
         parts = path[2:].split("/")
-        return [_parse_pointer_part(p) for p in parts]
+        return tuple(_parse_pointer_part(p) for p in parts)
     if path.startswith("/"):
         parts = path[1:].split("/")
-        return [_parse_pointer_part(p) for p in parts]
+        return tuple(_parse_pointer_part(p) for p in parts)
     s = path[2:] if path.startswith("$.") else path
     tokens: list[str | int] = []
     for m in _TOKEN_RE.finditer(s):
@@ -29,7 +31,14 @@ def parse_path(path: str) -> list[str | int | UnionToken]:
             tokens.append(int(idx))
     if not tokens and s:
         tokens = [s]
-    return tokens
+    return tuple(tokens)
+
+
+def parse_path(path: str) -> list[str | int | UnionToken]:
+    # Return a fresh list to preserve the historical public API while caching
+    # the immutable parse result internally. Callers may safely mutate it.
+    normalized = "" if path is None else str(path)
+    return list(_parse_path_cached(normalized))
 
 
 def _parse_pointer_part(part: str) -> str | int | UnionToken:

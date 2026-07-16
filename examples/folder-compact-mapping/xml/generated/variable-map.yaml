@@ -1,5 +1,0 @@
-FAB14:STAGING:
-  HOST: staging-xml-host
-  TIMEOUT: 45
-FAB14-FZ1:STAGING:
-  HOST: fz1-staging-xml-host

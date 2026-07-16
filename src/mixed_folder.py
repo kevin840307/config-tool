@@ -9,11 +9,14 @@ import shutil
 from yaml_config_engine.folder_compiler import FolderCompiler
 from yaml_config_engine.yamlio import load_one, load_all, dump_one, dump_all
 from yaml_config_engine.config_loader import load_config_with_variable_maps
+from yaml_config_engine.template import render_value
 from yaml_config_engine.variable_scope import resolve_scope_variables
 from yaml_config_engine.comparison import strict_documents_equal
 from xml_config_engine.folder_compiler import XmlFolderCompiler
 from xml_config_engine.engine import XmlPatchEngine
 from xml_config_engine.compiler import XmlDiffCompiler
+from folder_path_resolver import resolve_file_keys
+from file_key_generalizer import generalize_file_map, load_compile_path_context
 
 
 class MixedFolderCompiler:
@@ -96,10 +99,15 @@ class MixedFolderCompiler:
         layout: str = 'compact',
         matched_files_only: bool = False,
         exact_bytes: bool = False,
+        variables: dict[str, Any] | None = None,
+        variable_map_files: list[str | Path] | None = None,
+        fab: str = '',
+        env: str = '',
     ) -> dict[str, Any]:
         if layout not in {'compact', 'expanded'}:
             raise ValueError("layout must be 'compact' or 'expanded'")
         before = Path(before_root).resolve()
+        path_variables, compiled_variable_map = load_compile_path_context(variable_map_files, variables, fab, env)
         after = Path(after_root).resolve()
         out = Path(output_root).resolve()
         if out.exists():
@@ -117,6 +125,7 @@ class MixedFolderCompiler:
                 layout='expanded',
                 matched_files_only=matched_files_only,
                 exact_bytes=exact_bytes,
+                variables=variables, variable_map_files=variable_map_files, fab=fab, env=env,
             )
             xres = XmlFolderCompiler().compile_folder(
                 before, after, xml_out,
@@ -124,6 +133,7 @@ class MixedFolderCompiler:
                 verify=verify,
                 layout='expanded',
                 matched_files_only=matched_files_only,
+                variables=variables, variable_map_files=variable_map_files, fab=fab, env=env,
             )
 
             if layout == 'expanded':
@@ -164,7 +174,7 @@ class MixedFolderCompiler:
                 if verify:
                     with TemporaryDirectory(prefix='mixed-expanded-verify-') as verify_tmp:
                         actual = Path(verify_tmp) / 'actual'
-                        self.apply_folder(before, out, actual)
+                        self.apply_folder(before, out, actual, variables=path_variables, variable_map_files=variable_map_files)
                         if matched_files_only:
                             expected_tree = Path(verify_tmp) / 'expected'
                             shutil.copytree(before, expected_tree)
@@ -206,7 +216,7 @@ class MixedFolderCompiler:
                         docs = (cfg.get('operations') or [{}])[0].get('value', [])
                         files[rel] = {'format': 'yaml', f'{key_action}_documents': docs, 'strategy': entry.get('strategy')}
                 else:
-                    files[rel] = {'format': 'yaml', 'config': cfg, 'strategy': entry.get('strategy'), 'warnings': entry.get('warnings') or []}
+                    files[rel] = {'format': 'yaml', 'config': cfg, 'strategy': entry.get('strategy')}
 
             for entry in xmanifest.get('entries', []):
                 rel = entry['relative_path']; action = entry['action']
@@ -223,18 +233,28 @@ class MixedFolderCompiler:
                     files[rel] = {'format': 'xml', **payload}
                 else:
                     cfg = load_one(xml_out / entry['config'])
-                    files[rel] = {'format': 'xml', 'config': cfg, 'strategy': entry.get('strategy'), 'warnings': entry.get('warnings') or []}
+                    files[rel] = {'format': 'xml', 'config': cfg, 'strategy': entry.get('strategy')}
 
         summary = {'yaml': dict(ymanifest.get('counts') or {}), 'xml': dict(xmanifest.get('counts') or {})}
         summary['total'] = {key: int(summary['yaml'].get(key, 0)) + int(summary['xml'].get(key, 0)) for key in ('patch','create','delete','unchanged')}
-        patch = {'version': 1, 'kind': 'mixed-folder-patch-compact', 'formats': ['yaml','xml'], 'matched_files_only': matched_files_only, 'files': dict(sorted(files.items())), 'summary': summary}
+        generalized_files, generalization = generalize_file_map(dict(sorted(files.items())), before, variables=path_variables)
+        patch = {'version': 1, 'kind': 'mixed-folder-patch-compact', 'formats': ['yaml','xml'], 'matched_files_only': matched_files_only, 'files': generalized_files, 'summary': summary}
         patch_path = out / 'patch.yaml'; dump_one(patch, patch_path)
+        log_parts = []
+        for child in (yaml_out / 'log.txt', xml_out / 'log.txt'):
+            if child.exists() and child.read_text(encoding='utf-8').strip():
+                log_parts.append(child.read_text(encoding='utf-8').rstrip())
+        for item in generalization.get('variables', []):
+            log_parts.append(f"INFO file-key variable: {item.get('from')} -> {item.get('to')}")
+        for item in generalization.get('wildcards', []):
+            log_parts.append(f"INFO file-key wildcard: {item.get('from')} -> {item.get('to')}")
+        (out / 'log.txt').write_text(('\n'.join(log_parts) + ('\n' if log_parts else '')), encoding='utf-8')
 
         verified = bool(yres.verified and xres.verified)
         if verify:
             with TemporaryDirectory(prefix='mixed-folder-verify-') as tmp:
                 actual = Path(tmp) / 'actual'
-                self.apply_folder(before, patch_path, actual)
+                self.apply_folder(before, patch_path, actual, variables=path_variables, variable_map_files=variable_map_files)
                 if matched_files_only:
                     expected_tree = Path(tmp) / 'expected'
                     shutil.copytree(before, expected_tree)
@@ -262,8 +282,9 @@ class MixedFolderCompiler:
                         else:
                             files[rel.as_posix()] = {'format': fmt, f'{action}_bytes_base64': base64.b64encode(expected_snap[rel]).decode('ascii'), 'strategy': 'exact-bytes'}
                     if mismatches:
-                        patch['files'] = dict(sorted(files.items())); dump_one(patch, patch_path)
-                        shutil.rmtree(actual); self.apply_folder(before, patch_path, actual)
+                        generalized_files, generalization = generalize_file_map(dict(sorted(files.items())), before, variables=path_variables)
+                        patch['files'] = generalized_files; dump_one(patch, patch_path)
+                        shutil.rmtree(actual); self.apply_folder(before, patch_path, actual, variables=path_variables, variable_map_files=variable_map_files)
                 verified = self._trees_equal(actual, expected_tree, exact_bytes=exact_bytes)
         return {'verified': verified, 'patch': str(patch_path), 'summary': summary, 'layout': 'compact'}
 
@@ -331,71 +352,83 @@ class MixedFolderCompiler:
         yaml_compiler = FolderCompiler()
         xml_engine = XmlPatchEngine()
         report: list[dict[str, Any]] = []
-        for rel, raw_spec in (patch.get('files') or {}).items():
-            spec = dict(raw_spec or {})
-            fmt = spec.pop('format', None)
-            if fmt not in {'yaml', 'xml'}:
-                raise ValueError(f'{rel}: format must be yaml or xml')
-            target = output / rel
-            if spec.get('delete') is True:
-                if target.exists(): target.unlink()
-                report.append({'relative_path': rel, 'format': fmt, 'action': 'delete'})
-                continue
+        claimed_targets: dict[str, str] = {}
+        for raw_rel, raw_spec in (patch.get('files') or {}).items():
+            for rel in resolve_file_keys(output, str(raw_rel), patch, variables):
+                previous = claimed_targets.get(rel)
+                if previous is not None:
+                    raise ValueError(f'Folder patch file patterns overlap at {rel}: {previous!r} and {raw_rel!r}')
+                claimed_targets[rel] = str(raw_rel)
+                spec = dict(raw_spec or {})
+                fmt = spec.pop('format', None)
+                if fmt not in {'yaml', 'xml'}:
+                    raise ValueError(f'{raw_rel}: format must be yaml or xml')
+                target = output / rel
+                if spec.get('delete') is True:
+                    if target.exists(): target.unlink()
+                    report.append({'relative_path': rel, 'format': fmt, 'action': 'delete'})
+                    continue
 
-            if fmt == 'yaml':
-                if 'create_bytes_base64' in spec or 'replace_bytes_base64' in spec:
-                    encoded = spec.get('create_bytes_base64', spec.get('replace_bytes_base64'))
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(base64.b64decode(encoded))
-                    action = 'create' if 'create_bytes_base64' in spec else 'patch'
-                elif 'create_text' in spec or 'replace_text' in spec:
-                    key = 'create_text' if 'create_text' in spec else 'replace_text'
-                    self._write_text_spec(target, spec, key)
-                    action = 'create' if key == 'create_text' else 'patch'
-                elif 'create_documents' in spec or 'replace_documents' in spec:
-                    docs = spec.get('create_documents', spec.get('replace_documents'))
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    dump_all(docs, target)
-                    action = 'create' if 'create_documents' in spec else 'patch'
-                else:
-                    fab, env = self._scope_for(rel)
-                    scope_vars, _ = resolve_scope_variables(patch.get('variable_map', {}), fab, env)
-                    merged = dict(patch.get('variables') or {})
-                    merged.update(scope_vars)
-                    merged.update(variables or {})
-                    if 'config' in spec:
-                        cfg = dict(spec.get('config') or {})
+                if fmt == 'yaml':
+                    if 'create_bytes_base64' in spec or 'replace_bytes_base64' in spec:
+                        encoded = spec.get('create_bytes_base64', spec.get('replace_bytes_base64'))
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(base64.b64decode(encoded))
+                        action = 'create' if 'create_bytes_base64' in spec else 'patch'
+                    elif 'create_text' in spec or 'replace_text' in spec:
+                        key = 'create_text' if 'create_text' in spec else 'replace_text'
+                        self._write_text_spec(target, spec, key)
+                        action = 'create' if key == 'create_text' else 'patch'
+                    elif 'create_documents' in spec or 'replace_documents' in spec:
+                        docs = spec.get('create_documents', spec.get('replace_documents'))
+                        fab, env = self._scope_for(rel)
+                        scope_vars, _ = resolve_scope_variables(patch.get('variable_map', {}), fab, env)
+                        merged = dict(patch.get('variables') or {})
+                        merged.update(scope_vars)
+                        merged.update(variables or {})
+                        docs = render_value(docs, merged)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        dump_all(docs, target)
+                        action = 'create' if 'create_documents' in spec else 'patch'
                     else:
-                        operations = [yaml_compiler._expand_compact_operation(op, i) for i, op in enumerate(spec.get('ops', []), 1)]
-                        cfg = {
-                            'version': 1,
-                            'options': patch.get('options') or {'atomic_write': True},
-                            'variables': patch.get('variables') or {},
-                            'variable_map': patch.get('variable_map') or {},
-                            'operations': operations,
-                        }
-                    yaml_compiler.engine.apply_file(target, cfg, target, merged)
-                    action = 'patch'
-            else:
-                if 'create_bytes_base64' in spec or 'replace_bytes_base64' in spec:
-                    encoded = spec.get('create_bytes_base64', spec.get('replace_bytes_base64'))
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(base64.b64decode(encoded))
-                    action = 'create' if 'create_bytes_base64' in spec else 'patch'
-                elif 'create_text' in spec or 'replace_text' in spec:
-                    key = 'create_text' if 'create_text' in spec else 'replace_text'
-                    self._write_text_spec(target, spec, key)
-                    action = 'create' if key == 'create_text' else 'patch'
+                        fab, env = self._scope_for(rel)
+                        scope_vars, _ = resolve_scope_variables(patch.get('variable_map', {}), fab, env)
+                        merged = dict(patch.get('variables') or {})
+                        merged.update(scope_vars)
+                        merged.update(variables or {})
+                        if 'config' in spec:
+                            cfg = dict(spec.get('config') or {})
+                        else:
+                            operations = [yaml_compiler._expand_compact_operation(op, i) for i, op in enumerate(spec.get('ops', []), 1)]
+                            cfg = {
+                                'version': 1,
+                                'options': patch.get('options') or {'atomic_write': True},
+                                'variables': patch.get('variables') or {},
+                                'variable_map': patch.get('variable_map') or {},
+                                'operations': operations,
+                            }
+                        yaml_compiler.engine.apply_file(target, cfg, target, merged)
+                        action = 'patch'
                 else:
-                    fab, env = self._scope_for(rel)
-                    scope_vars, _ = resolve_scope_variables(patch.get('variable_map', {}), fab, env)
-                    merged = dict(patch.get('variables') or {})
-                    merged.update(scope_vars)
-                    merged.update(variables or {})
-                    cfg = dict(spec.get('config') or {})
-                    xml_engine.apply_file(target, cfg, target, merged)
-                    action = 'patch'
-            report.append({'relative_path': rel, 'format': fmt, 'action': action})
+                    if 'create_bytes_base64' in spec or 'replace_bytes_base64' in spec:
+                        encoded = spec.get('create_bytes_base64', spec.get('replace_bytes_base64'))
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(base64.b64decode(encoded))
+                        action = 'create' if 'create_bytes_base64' in spec else 'patch'
+                    elif 'create_text' in spec or 'replace_text' in spec:
+                        key = 'create_text' if 'create_text' in spec else 'replace_text'
+                        self._write_text_spec(target, spec, key)
+                        action = 'create' if key == 'create_text' else 'patch'
+                    else:
+                        fab, env = self._scope_for(rel)
+                        scope_vars, _ = resolve_scope_variables(patch.get('variable_map', {}), fab, env)
+                        merged = dict(patch.get('variables') or {})
+                        merged.update(scope_vars)
+                        merged.update(variables or {})
+                        cfg = dict(spec.get('config') or {})
+                        xml_engine.apply_file(target, cfg, target, merged)
+                        action = 'patch'
+                report.append({'relative_path': rel, 'format': fmt, 'action': action})
 
         counts = {
             fmt: {action: sum(1 for x in report if x['format'] == fmt and x['action'] == action)

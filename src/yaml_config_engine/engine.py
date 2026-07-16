@@ -6,7 +6,7 @@ import os, tempfile, shutil
 from typing import Any
 from .yamlio import load_all, dump_all, load_one, clone
 from .config_loader import load_config_with_variable_maps
-from .models import EngineConfig
+from .models import EngineConfig, apply_defaults_profile
 from .template import render_value
 from .operations import registry, OperationContext
 from .errors import ConfigError, ValidationError
@@ -15,6 +15,23 @@ from .pathing import expand_paths, path_has_selectors
 from .comparison import strict_documents_equal
 from ruamel.yaml.scalarstring import PlainScalarString, SingleQuotedScalarString, DoubleQuotedScalarString
 
+
+
+
+def _references_original(value: Any) -> bool:
+    """Return True only when template text can read the original snapshot.
+
+    Generated patches almost never use ``original``. Avoiding the snapshot in
+    that common case removes a full-document deepcopy per replay while keeping
+    exact legacy semantics whenever an original-reference is present.
+    """
+    if isinstance(value, str):
+        return ("{{" in value or "{%" in value) and "original" in value
+    if isinstance(value, dict):
+        return any(_references_original(k) or _references_original(v) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_references_original(v) for v in value)
+    return False
 
 def _quoted_scalar(value: Any, style: str) -> Any:
     style = str(style or 'auto').lower()
@@ -81,41 +98,67 @@ class YamlPatchEngine:
     def load_config(self, path: str | Path, variable_map_files: list[str | Path] | None = None) -> EngineConfig:
         return EngineConfig.model_validate(load_config_with_variable_maps(path, variable_map_files))
 
-    def apply_document(self, document: Any, config: EngineConfig | dict[str, Any], extra_variables: dict[str, Any] | None = None) -> Any:
+    def apply_document(self, document: Any, config: EngineConfig | dict[str, Any], extra_variables: dict[str, Any] | None = None, *, track_no_effect: bool = True) -> Any:
         cfg = config if isinstance(config, EngineConfig) else EngineConfig.model_validate(config)
-        original = clone(document)
+        operations_source = config.operations if isinstance(config, EngineConfig) else config.get("operations", [])
+        original = clone(document) if _references_original(operations_source) else document
         skipped: list[dict[str, Any]] = []
         ctx = OperationContext(document=document, original=original, variables={}, captures={}, skipped_operations=skipped)
         variables = dict(cfg.variables)
         variables.update(extra_variables or {})
         for raw in cfg.operations:
-            operation_before = clone(ctx.document)
+            operation_before = clone(ctx.document) if track_no_effect else None
             skipped_before = len(skipped)
             context = {**variables, "captures": ctx.captures, **ctx.captures, "original": original, "current": ctx.document}
-            spec = _apply_quote_directives(render_value(deepcopy(raw), context))
+            spec = apply_defaults_profile(_apply_quote_directives(render_value(raw, context)), cfg.defaults_profile)
             if "op" not in spec: raise ConfigError("Operation missing op")
-            path = spec.get("path")
-            if isinstance(path, str) and path_has_selectors(path):
-                concrete_paths = expand_paths(ctx.document, path)
-                if not concrete_paths:
-                    policy = str(spec.get("missing", "skip")).lower()
-                    if policy == "skip" or str(spec.get("on_zero_matches", "")).lower() in {"skip", "ignore"}:
-                        skipped.append({"id": spec.get("id"), "op": spec.get("op"), "path": path, "reason": "selector path matched no nodes"})
-                        continue
-                    if policy == "create" or spec.get("create_missing") is True:
-                        raise ConfigError("missing: create is not supported for selector paths")
-                    raise ConfigError(f"Selector path matched no nodes: {path!r}")
-                # Removing list items must run from highest index to lowest so
-                # earlier removals do not shift later concrete indices.
+            raw_paths = spec.get("paths")
+            if raw_paths is not None:
+                patterns = list(raw_paths)
+                concrete_paths: list[str] = []
+                seen_paths: set[str] = set()
+                for pattern in patterns:
+                    matches = expand_paths(ctx.document, pattern) if path_has_selectors(pattern) else [pattern]
+                    if not matches:
+                        policy = str(spec.get("missing", "skip")).lower()
+                        if policy == "skip" or str(spec.get("on_zero_matches", "")).lower() in {"skip", "ignore"}:
+                            skipped.append({"id": spec.get("id"), "op": spec.get("op"), "path": pattern, "reason": "paths entry matched no nodes"})
+                            continue
+                        if policy == "create" or spec.get("create_missing") is True:
+                            raise ConfigError("missing: create is not supported for an unmatched selector in paths")
+                        raise ConfigError(f"paths entry matched no nodes: {pattern!r}")
+                    for matched in matches:
+                        if matched not in seen_paths:
+                            seen_paths.add(matched)
+                            concrete_paths.append(matched)
                 if spec["op"] == "remove":
                     concrete_paths = list(reversed(concrete_paths))
                 for concrete_path in concrete_paths:
                     expanded = deepcopy(spec)
+                    expanded.pop("paths", None)
                     expanded["path"] = concrete_path
                     registry.execute(expanded["op"], ctx, expanded)
             else:
-                registry.execute(spec["op"], ctx, spec)
-            if len(skipped) == skipped_before and strict_documents_equal([ctx.document], [operation_before]):
+                path = spec.get("path")
+                if isinstance(path, str) and path_has_selectors(path):
+                    concrete_paths = expand_paths(ctx.document, path)
+                    if not concrete_paths:
+                        policy = str(spec.get("missing", "skip")).lower()
+                        if policy == "skip" or str(spec.get("on_zero_matches", "")).lower() in {"skip", "ignore"}:
+                            skipped.append({"id": spec.get("id"), "op": spec.get("op"), "path": path, "reason": "selector path matched no nodes"})
+                            continue
+                        if policy == "create" or spec.get("create_missing") is True:
+                            raise ConfigError("missing: create is not supported for selector paths")
+                        raise ConfigError(f"Selector path matched no nodes: {path!r}")
+                    if spec["op"] == "remove":
+                        concrete_paths = list(reversed(concrete_paths))
+                    for concrete_path in concrete_paths:
+                        expanded = deepcopy(spec)
+                        expanded["path"] = concrete_path
+                        registry.execute(expanded["op"], ctx, expanded)
+                else:
+                    registry.execute(spec["op"], ctx, spec)
+            if track_no_effect and len(skipped) == skipped_before and strict_documents_equal([ctx.document], [operation_before]):
                 skipped.append({
                     "id": spec.get("id"), "op": spec.get("op"), "path": spec.get("path"),
                     "reason": "no effect (target missing, selector matched nothing, or value already satisfied)",

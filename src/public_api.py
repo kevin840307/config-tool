@@ -174,18 +174,22 @@ class ConfigTool:
     def compile_folder(self, before_root: str | Path, after_root: str | Path, output_root: str | Path, *,
                        format: Format = 'mixed', include_unchanged: bool = False, verify: bool = True,
                        layout: str = 'compact', matched_files_only: bool = False, exact_bytes: bool = False,
-                       **kwargs: Any) -> ConfigToolResult:
+                       variables: dict[str, Any] | None = None, variable_map_files: str | Path | Iterable[str | Path] | None = None,
+                       fab: str = '', env: str = '', **kwargs: Any) -> ConfigToolResult:
         Path(output_root).mkdir(parents=True, exist_ok=True)
+        mapping_files = self._normalize_mapping_files(variable_map_files)
         if format in {'auto', 'mixed'}:
             r = MixedFolderCompiler().compile_folder(before_root, after_root, output_root, include_unchanged=include_unchanged,
-                    verify=verify, layout=layout, matched_files_only=matched_files_only, exact_bytes=exact_bytes)
+                    verify=verify, layout=layout, matched_files_only=matched_files_only, exact_bytes=exact_bytes,
+                    variables=variables, variable_map_files=mapping_files, fab=fab, env=env)
             return ConfigToolResult(bool(r.get('verified', True)), 'compile_folder', 'mixed', Path(output_root), verified=r.get('verified'), data=r)
         if format == 'yaml':
             r = FolderCompiler(retry_protection=self.retry_protection, readable=self.readable).compile_folder(
                 before_root, after_root, output_root, include_unchanged=include_unchanged, verify=verify, layout=layout,
-                matched_files_only=matched_files_only, exact_bytes=exact_bytes, **kwargs)
+                matched_files_only=matched_files_only, exact_bytes=exact_bytes, variables=variables,
+                variable_map_files=mapping_files, fab=fab, env=env, **kwargs)
         elif format == 'xml':
-            r = XmlFolderCompiler().compile_folder(before_root, after_root, output_root, include_unchanged, verify, layout, matched_files_only)
+            r = XmlFolderCompiler().compile_folder(before_root, after_root, output_root, include_unchanged, verify, layout, matched_files_only, variables, mapping_files, fab, env)
         else: raise ValueError(format)
         return ConfigToolResult(bool(r.verified), 'compile_folder', format, Path(output_root), verified=bool(r.verified), data=r)
 

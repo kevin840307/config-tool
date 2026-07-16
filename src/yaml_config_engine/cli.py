@@ -78,6 +78,10 @@ def main(argv: list[str] | None = None) -> int:
     cf.add_argument("--matched-files-only", action="store_true", help="Generate auto config only for relative paths present in both before and after")
     cf.add_argument("--exact-bytes", action="store_true", help="Require byte-identical output; may use Base64 fallback")
     cf.add_argument("--retry-protection", action="store_true", help="Generate duplicate/idempotency guards; disabled by default")
+    cf.add_argument("--var", action="append", default=[], help="Explicit file-key variable NAME=VALUE")
+    cf.add_argument("--variable-map-file", action="append", default=[], help="Use mapping values to parameterize generated file keys")
+    cf.add_argument("--fab", default="", help="FAB scope used for file-key mapping")
+    cf.add_argument("--env", default="", help="ENV scope used for file-key mapping")
 
     af = sub.add_parser("apply-folder", help="Apply a generated folder manifest")
     af.add_argument("source_root"); af.add_argument("generated_root"); af.add_argument("output_root")
@@ -147,8 +151,13 @@ def main(argv: list[str] | None = None) -> int:
                 candidate, accepted = verified_generalize_config(before_docs[0], after_docs[0], config, resolved_vars)
                 if accepted:
                     config = candidate
-                    config['variable_map_file'] = stored_refs[0] if len(stored_refs) == 1 else stored_refs
-                    config['scope'] = {'fab': args.fab, 'env': args.env}
+                    # Keep generated patches environment-neutral. The mapping
+                    # is used only to discover {{ variable }} templates; actual
+                    # values are supplied again during apply/verify.
+                    config.pop('variables', None)
+                    config.pop('variable_map', None)
+                    config.pop('variable_map_file', None)
+                    config.pop('scope', None)
                     generalized = True
                     warnings.append('Generalized generated values with mapping scopes: ' + ', '.join(matched_scopes))
                 else:
@@ -191,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             layout=args.layout,
             matched_files_only=args.matched_files_only,
             exact_bytes=args.exact_bytes,
+            variables=parse_vars(args.var), variable_map_files=args.variable_map_file, fab=args.fab, env=args.env,
         )
         summary = {
             "verified": result.verified,

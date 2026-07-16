@@ -1,0 +1,11 @@
+{
+  "release": "0.10.0-rc1",
+  "input_lines": 1603,
+  "compile_seconds": 1.07137,
+  "apply_seconds": 0.790875,
+  "verify_seconds": 1.326322,
+  "operations": 1,
+  "compile_verified": true,
+  "apply_changed": true,
+  "verify_passed": true
+}
